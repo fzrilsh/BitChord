@@ -22,6 +22,8 @@ var SIGNED_ENDPOINTS = /* @__PURE__ */ new Set([
   "playlist/get_add_to_playlist",
   "browse/edit_playlist"
 ]);
+var GENERATE_IT_PATH = "/yt/jnn/GenerateIT";
+var GENERATE_IT_UPSTREAM = `${WWW_ORIGIN}/api/jnn/v1/GenerateIT`;
 function signedEndpoint(pathname) {
   if (!pathname.startsWith("/yt/")) return null;
   const endpoint = pathname.slice(4);
@@ -34,7 +36,8 @@ function corsHeaders(request, env) {
   const allowOrigin = allowed.length === 0 ? "*" : origin && allowed.includes(origin) ? origin : allowed[0];
   return {
     "Access-Control-Allow-Origin": allowOrigin,
-    "Access-Control-Allow-Headers": "Content-Type, X-Bitchord-Cookie, X-Bitchord-Auth, X-Goog-AuthUser, X-Goog-PageId, X-Bitchord-Token",
+    // x-goog-api-key and x-user-agent are what BotGuard's GenerateIT sends.
+    "Access-Control-Allow-Headers": "Content-Type, X-Bitchord-Cookie, X-Bitchord-Auth, X-Goog-AuthUser, X-Goog-PageId, X-Bitchord-Token, X-Goog-Api-Key, X-User-Agent",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Expose-Headers": "Content-Type, Content-Length, X-Upstream-Status",
     Vary: "Origin"
@@ -83,22 +86,31 @@ async function handleSigned(request, env, url) {
   if (env.RELAY_TOKEN && request.headers.get("x-bitchord-token") !== env.RELAY_TOKEN) {
     return json(request, env, { error: "bad relay token" }, 401);
   }
-  const endpoint = signedEndpoint(url.pathname);
-  if (!endpoint) {
+  const anonymous = url.pathname === GENERATE_IT_PATH;
+  const endpoint = anonymous ? null : signedEndpoint(url.pathname);
+  if (!anonymous && !endpoint) {
     return json(request, env, { error: `not a signed endpoint: ${url.pathname}` }, 403);
   }
-  const cookie = request.headers.get("x-bitchord-cookie");
-  const auth = request.headers.get("x-bitchord-auth");
-  if (!cookie || !auth) return json(request, env, { error: "missing session" }, 401);
-  const headers = youtubeHeaders(MUSIC_ORIGIN);
-  headers.set("Content-Type", "text/plain;charset=UTF-8");
-  headers.set("Cookie", cookie);
-  headers.set("Authorization", auth);
-  const authUser = request.headers.get("x-goog-authuser");
-  if (authUser) headers.set("X-Goog-AuthUser", authUser);
-  const pageId = request.headers.get("x-goog-pageid");
-  if (pageId) headers.set("X-Goog-PageId", pageId);
-  const upstream = await fetch(`${MUSIC_ORIGIN}/youtubei/v1/${endpoint}${url.search}`, {
+  const headers = youtubeHeaders(anonymous ? WWW_ORIGIN : MUSIC_ORIGIN);
+  if (anonymous) {
+    for (const name of ["x-goog-api-key", "x-user-agent", "content-type"]) {
+      const value = request.headers.get(name);
+      if (value) headers.set(name, value);
+    }
+  } else {
+    headers.set("Content-Type", "text/plain;charset=UTF-8");
+    const cookie = request.headers.get("x-bitchord-cookie");
+    const auth = request.headers.get("x-bitchord-auth");
+    if (!cookie || !auth) return json(request, env, { error: "missing session" }, 401);
+    headers.set("Cookie", cookie);
+    headers.set("Authorization", auth);
+    const authUser = request.headers.get("x-goog-authuser");
+    if (authUser) headers.set("X-Goog-AuthUser", authUser);
+    const pageId = request.headers.get("x-goog-pageid");
+    if (pageId) headers.set("X-Goog-PageId", pageId);
+  }
+  const target = anonymous ? GENERATE_IT_UPSTREAM : `${MUSIC_ORIGIN}/youtubei/v1/${endpoint}${url.search}`;
+  const upstream = await fetch(target, {
     method: "POST",
     headers,
     body: await request.text()
@@ -185,7 +197,7 @@ var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx)
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// .wrangler/tmp/bundle-7kqHlX/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-7pBzE5/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
@@ -217,7 +229,7 @@ function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// .wrangler/tmp/bundle-7kqHlX/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-7pBzE5/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;

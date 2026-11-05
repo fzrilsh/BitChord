@@ -53,7 +53,10 @@ const MAX_REMEMBERED = 64;
 export class UnplayableError extends Error {
   override readonly name = 'UnplayableError';
 
-  /** An age gate, which a signed-in request may get past (prompt §5.3). */
+  /**
+   * A verdict the signed-in user may get past: an age gate, or YouTube's
+   * "confirm you're not a bot" check (which a logged-in session usually passes).
+   */
   readonly ageGated: boolean;
 
   constructor(message: string, ageGated = false) {
@@ -181,10 +184,27 @@ export async function playerRequest(
 }
 
 /** Why a playability status is a verdict on the track rather than on the client, or null if it isn't. */
-const AGE_GATE = /confirm your age|age-restricted|inappropriate for some users|sign in to confirm/;
+const AGE_GATE = /confirm your age|age-restricted|inappropriate for some users/;
+
+/**
+ * YouTube thinks this IP is a bot ("Sign in to confirm you're not a bot").
+ * Anonymous clients are refused wholesale, so it is a verdict on the *visitor*,
+ * not the track: the answer is to ask as the signed-in user, not to try more
+ * anonymous clients.
+ */
+const BOT_CHECK = /sign in to confirm you(’|')?re not a bot|confirm you(’|')?re not a bot/i;
+
+export function isBotCheck(reason: string | null | undefined): boolean {
+  return BOT_CHECK.test(reason ?? '');
+}
 
 function permanentReason(status: string | undefined, reason: string | undefined, signedIn: boolean): string | null {
   const text = (reason ?? '').toLowerCase();
+  if (BOT_CHECK.test(text)) {
+    return signedIn
+      ? 'YouTube is asking this account to confirm it isn’t a bot. Open music.youtube.com once and play something, then try again.'
+      : 'YouTube wants a sign-in before it will serve this browser. Sign in to YouTube Music, then try again.';
+  }
   if (AGE_GATE.test(text)) {
     return signedIn
       ? 'YouTube won’t serve this age-restricted track to this account. Check the account’s age is verified on YouTube.'
@@ -239,7 +259,8 @@ export async function resolvePlayer(
       const verdict = permanentReason(status, reason, signed);
       if (verdict) {
         permanent = verdict;
-        ageGated ||= AGE_GATE.test(reason.toLowerCase());
+        // A bot check is answered by signing in, exactly like an age gate.
+        ageGated ||= AGE_GATE.test(reason.toLowerCase()) || BOT_CHECK.test(reason);
       }
       excludeClient(videoId, client, `${status}: ${reason} (${ms}ms)`, signed);
     } catch (error) {
@@ -252,5 +273,9 @@ export async function resolvePlayer(
     rememberUnplayable(videoId, signed, permanent, ageGated);
     throw new UnplayableError(permanent, ageGated);
   }
+  // Nothing said anything final about the track, so say what the last client
+  // did rather than a generic "no client would play this": on iOS the usual
+  // cause is a client whose URLs stop at ~1.2 MB, which reads as a stream
+  // failure rather than a refusal.
   throw new Error(lastReason);
 }

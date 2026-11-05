@@ -184,10 +184,12 @@ export class YouTubeEngine {
         try {
           resolved = await timed('player request', videoId, () => resolvePlayer(yt, videoId, skip, signed));
         } catch (error) {
-          // An age gate is a verdict on the visitor, not the track: ask again
-          // as the signed-in user, through the extension (prompt §5.3).
-          if (!(error instanceof UnplayableError && error.ageGated) || signed || !ytAuthSnapshot().signedIn) throw error;
-          trackLog.i('age-restricted; asking again signed in', videoId);
+          // An age gate or a bot check is a verdict on the visitor, not the
+          // track: ask again as the signed-in user (prompt §5.3). With no
+          // session there is nothing better to try, so the message says so.
+          const visitorVerdict = error instanceof UnplayableError && error.ageGated;
+          if (!visitorVerdict || signed || !ytAuthSnapshot().signedIn) throw error;
+          trackLog.i('refused for this visitor; asking again signed in', videoId);
           yt = await timed('signed-in InnerTube session', videoId, getSignedInnertube);
           signed = true;
           skip.clear();

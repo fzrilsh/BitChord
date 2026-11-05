@@ -52,6 +52,16 @@ const SIGNED_ENDPOINTS = new Set([
   'browse/edit_playlist',
 ]);
 
+/**
+ * BotGuard's GenerateIT, which needs YouTube's Origin but not a session. The
+ * page's integrity token is only accepted when it was minted from that origin,
+ * so without the extension this is the only way to get one.
+ *
+ * It lives on `/api/jnn/v1/`, not `/youtubei/v1/`, so it carries its own path.
+ */
+const GENERATE_IT_PATH = '/yt/jnn/GenerateIT';
+const GENERATE_IT_UPSTREAM = `${WWW_ORIGIN}/api/jnn/v1/GenerateIT`;
+
 function signedEndpoint(pathname: string): string | null {
   if (!pathname.startsWith('/yt/')) return null;
   const endpoint = pathname.slice(4);
@@ -67,7 +77,9 @@ function corsHeaders(request: Request, env: Env): Record<string, string> {
   const allowOrigin = allowed.length === 0 ? '*' : origin && allowed.includes(origin) ? origin : allowed[0]!;
   return {
     'Access-Control-Allow-Origin': allowOrigin,
-    'Access-Control-Allow-Headers': 'Content-Type, X-Bitchord-Cookie, X-Bitchord-Auth, X-Goog-AuthUser, X-Goog-PageId, X-Bitchord-Token',
+    // x-goog-api-key and x-user-agent are what BotGuard's GenerateIT sends.
+    'Access-Control-Allow-Headers':
+      'Content-Type, X-Bitchord-Cookie, X-Bitchord-Auth, X-Goog-AuthUser, X-Goog-PageId, X-Bitchord-Token, X-Goog-Api-Key, X-User-Agent',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Expose-Headers': 'Content-Type, Content-Length, X-Upstream-Status',
     Vary: 'Origin',
@@ -122,25 +134,36 @@ async function handleSigned(request: Request, env: Env, url: URL): Promise<Respo
   if (env.RELAY_TOKEN && request.headers.get('x-bitchord-token') !== env.RELAY_TOKEN) {
     return json(request, env, { error: 'bad relay token' }, 401);
   }
-  const endpoint = signedEndpoint(url.pathname);
-  if (!endpoint) {
+  const anonymous = url.pathname === GENERATE_IT_PATH;
+  const endpoint = anonymous ? null : signedEndpoint(url.pathname);
+  if (!anonymous && !endpoint) {
     return json(request, env, { error: `not a signed endpoint: ${url.pathname}` }, 403);
   }
 
-  const cookie = request.headers.get('x-bitchord-cookie');
-  const auth = request.headers.get('x-bitchord-auth');
-  if (!cookie || !auth) return json(request, env, { error: 'missing session' }, 401);
+  const headers = youtubeHeaders(anonymous ? WWW_ORIGIN : MUSIC_ORIGIN);
+  if (anonymous) {
+    // GenerateIT needs its own `x-goog-api-key` and `x-user-agent`; carry only
+    // those through. A browser's `referer`, `sec-ch-ua*` or `accept-encoding`
+    // make YouTube answer 403 ("unregistered callers").
+    for (const name of ['x-goog-api-key', 'x-user-agent', 'content-type']) {
+      const value = request.headers.get(name);
+      if (value) headers.set(name, value);
+    }
+  } else {
+    headers.set('Content-Type', 'text/plain;charset=UTF-8');
+    const cookie = request.headers.get('x-bitchord-cookie');
+    const auth = request.headers.get('x-bitchord-auth');
+    if (!cookie || !auth) return json(request, env, { error: 'missing session' }, 401);
+    headers.set('Cookie', cookie);
+    headers.set('Authorization', auth);
+    const authUser = request.headers.get('x-goog-authuser');
+    if (authUser) headers.set('X-Goog-AuthUser', authUser);
+    const pageId = request.headers.get('x-goog-pageid');
+    if (pageId) headers.set('X-Goog-PageId', pageId);
+  }
 
-  const headers = youtubeHeaders(MUSIC_ORIGIN);
-  headers.set('Content-Type', 'text/plain;charset=UTF-8');
-  headers.set('Cookie', cookie);
-  headers.set('Authorization', auth);
-  const authUser = request.headers.get('x-goog-authuser');
-  if (authUser) headers.set('X-Goog-AuthUser', authUser);
-  const pageId = request.headers.get('x-goog-pageid');
-  if (pageId) headers.set('X-Goog-PageId', pageId);
-
-  const upstream = await fetch(`${MUSIC_ORIGIN}/youtubei/v1/${endpoint}${url.search}`, {
+  const target = anonymous ? GENERATE_IT_UPSTREAM : `${MUSIC_ORIGIN}/youtubei/v1/${endpoint}${url.search}`;
+  const upstream = await fetch(target, {
     method: 'POST',
     headers,
     body: await request.text(),

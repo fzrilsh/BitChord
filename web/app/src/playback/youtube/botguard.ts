@@ -13,6 +13,7 @@
 import type { BotGuardClient } from 'bgutils-js/botguard';
 import type { IBotguardClientSideBgChallenge, WebPoSignalOutput } from 'bgutils-js/shared-types';
 import type { WebPoMinter } from 'bgutils-js/webpo';
+import { config } from '@/config';
 import { getBridge } from '@/extension/bridge';
 import { timed, trackLog } from '../trackLog';
 
@@ -81,16 +82,35 @@ class BotguardService {
 
     const webPoSignalOutput: WebPoSignalOutput = [];
     const botguardResponse = await this.client.snapshot({ webPoSignalOutput });
+
+    // GenerateIT has to come from YouTube's origin. The extension's `yt.fetch`
+    // does that; without one (iOS Safari) the Worker's /yt relay does, since
+    // the endpoint only cares about Origin and not about a session.
     const bridge = getBridge();
-    if (!bridge) throw new Error('BotGuard needs the extension to request an integrity token');
-    const integrityResponse = await bridge.call('yt.fetch', {
-      url: buildURL('GenerateIT', true),
-      method: 'POST',
-      headers,
-      body: JSON.stringify([REQUEST_KEY, botguardResponse]),
-    });
-    if (integrityResponse.status !== 200) throw new Error(`GenerateIT answered ${integrityResponse.status}`);
-    const [integrityToken, ttlSeconds] = JSON.parse(integrityResponse.body) as [string?, number?];
+    let integrityToken: string | undefined;
+    let ttlSeconds: number | undefined;
+    if (bridge) {
+      const integrityResponse = await bridge.call('yt.fetch', {
+        url: buildURL('GenerateIT', true),
+        method: 'POST',
+        headers,
+        body: JSON.stringify([REQUEST_KEY, botguardResponse]),
+      });
+      if (integrityResponse.status !== 200) throw new Error(`GenerateIT answered ${integrityResponse.status}`);
+      [integrityToken, ttlSeconds] = JSON.parse(integrityResponse.body) as [string?, number?];
+    } else if (config.workerUrl) {
+      const response = await fetch(`${config.workerUrl.replace(/\/+$/, '')}/yt/jnn/GenerateIT`, {
+        method: 'POST',
+        // The same three headers the extension's path sends: GenerateIT answers
+        // 403 without its API key.
+        headers,
+        body: JSON.stringify([REQUEST_KEY, botguardResponse]),
+      });
+      if (!response.ok) throw new Error(`GenerateIT answered ${response.status}`);
+      [integrityToken, ttlSeconds] = (await response.json()) as [string?, number?];
+    } else {
+      throw new Error('BotGuard needs the extension or the Worker to request an integrity token');
+    }
     if (!integrityToken) throw new Error(`No integrity token (interpreter ${challenge.interpreterHash})`);
 
     this.minter = await WebPoMinter.create({ integrityToken }, webPoSignalOutput);
