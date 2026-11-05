@@ -1,6 +1,7 @@
 import type { ApiResponse, Innertube, YT } from 'youtubei.js/web';
 import { trackLog } from '../trackLog';
 import { botguard } from './botguard';
+import { deviceVisitorData } from './innertube';
 
 /**
  * Which identity asks YouTube for a track, in order (prompt §5.2 step 5,
@@ -215,6 +216,13 @@ export function onSessionChanged() {
  * mints streams that googlevideo cuts off after ~1.3 MB, about 70s of audio
  * (measured 2026-10-15: 4 of 4 VISIONOS URLs refused a range past that point
  * with it, 0 of 4 without; the browser saw the same wall over SABR).
+ *
+ * `visitorData` is what decides whether the response is a full-length URL at
+ * all. Measured 2026-11-05 from a residential IP with an opaque origin (the
+ * sandbox's): VISIONOS answers LOGIN_REQUIRED without it, and OK with a URL
+ * that serves every byte range when it carries the visitorData YouTube issued
+ * this session. The phone clients are unaffected — IOS/ANDROID answer OK
+ * either way, but their URLs stop at ~1 MiB.
  */
 export async function playerRequest(
   yt: Innertube,
@@ -223,6 +231,22 @@ export async function playerRequest(
   reloadPlaybackContext?: unknown,
 ): Promise<ApiResponse> {
   const poToken = await playerRequestToken(yt, client);
+  // HTTPClient#processJsonPayload discards any `context` in the body and uses
+  // `session.context` instead, rewriting only clientName/clientVersion for
+  // `client`. So the visitor data must be on the session to reach the wire.
+  //
+  // The session's own value came from /sw.js_data fetched by the Worker, which
+  // makes it Cloudflare's, not this device's — and YouTube binds it to the
+  // address. VISIONOS answers LOGIN_REQUIRED with a foreign one, and it is the
+  // only client that serves full-length audio. The device's own value replaces
+  // it when the sandbox can read one.
+  const device = await deviceVisitorData();
+  if (device) {
+    yt.session.context.client.visitorData = device;
+  } else if (!yt.session.context.client.visitorData) {
+    trackLog.w(`${client} player request has no visitorData; VISIONOS will answer LOGIN_REQUIRED`, videoId);
+  }
+
   return yt.actions.execute('/player', {
     ...(poToken && { serviceIntegrityDimensions: { poToken } }),
     videoId,

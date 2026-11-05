@@ -148,6 +148,49 @@ async function signedFetch(input: RequestInfo | URL, init?: RequestInit): Promis
 }
 
 /**
+ * A visitorData that belongs to this device.
+ *
+ * YouTube binds a visitorData to the address that asked for it. The session
+ * bootstrap arrives through the Worker, so the one it carries was minted for
+ * Cloudflare's IP; presenting it from the phone is answered LOGIN_REQUIRED, and
+ * VISIONOS — the only client that serves full-length audio — becomes
+ * unreachable.
+ *
+ * Any youtubei call the sandbox makes returns the device's own visitorData in
+ * `responseContext`. A search is the cheapest one that needs no session. The
+ * value is cached for the life of the page: it does not change.
+ */
+let visitorDataForDevice: Promise<string | null> | null = null;
+
+export function deviceVisitorData(): Promise<string | null> {
+  visitorDataForDevice ??= (async () => {
+    try {
+      const response = await sandboxFetch('https://music.youtube.com/youtubei/v1/search?prettyPrint=false', {
+        method: 'POST',
+        body: JSON.stringify({
+          context: { client: { clientName: 'WEB', clientVersion: '2.20260623.01.00', hl: 'en', gl: 'US' } },
+          query: 'a',
+        }),
+      });
+      const body = (await response.json()) as { responseContext?: { visitorData?: string } };
+      const visitorData = body.responseContext?.visitorData ?? null;
+      if (visitorData) {
+        trackLog.d(`device visitorData ${visitorData.slice(0, 16)}…`);
+      } else {
+        trackLog.w('no visitorData in the sandbox response');
+      }
+      return visitorData;
+    } catch (error) {
+      // Not fatal: the track still plays through the phone clients, just cut
+      // at ~1 MiB, and the reason is in the log.
+      trackLog.w(`could not read this device's visitorData: ${String(error)}`);
+      return null;
+    }
+  })();
+  return visitorDataForDevice;
+}
+
+/**
  * Assets YouTube.js needs but YouTube serves without CORS headers for any
  * origin: the session bootstrap (`/sw.js_data`), the player script the
  * signature decipher runs from, and the iframe API.
@@ -159,7 +202,17 @@ async function signedFetch(input: RequestInfo | URL, init?: RequestInit): Promis
  */
 function needsAssetProxy(url: URL): boolean {
   if (url.hostname !== 'www.youtube.com') return false;
-  return url.pathname === '/sw.js_data' || url.pathname === '/iframe_api' || url.pathname.startsWith('/s/player/');
+  // /sw.js_data IS here: a sandbox cannot read it either (it carries no ACAO;
+  // measured "Load failed" in WebKit), so without this the app does not start.
+  //
+  // The visitorData inside it was minted for Cloudflare's IP, and YouTube binds
+  // visitorData to the address that asked for it — a player request presenting
+  // it from the phone is answered LOGIN_REQUIRED. `deviceVisitorData` replaces
+  // the value before any player request goes out, so only the bootstrap is
+  // Cloudflare's; nothing downstream depends on it.
+  return (
+    url.pathname === '/sw.js_data' || url.pathname === '/iframe_api' || url.pathname.startsWith('/s/player/')
+  );
 }
 
 function workerAssetUrl(target: string): string {
@@ -240,9 +293,13 @@ async function create(fetch: typeof globalThis.fetch = selectFetch()): Promise<I
       retrieve_player: true,
     });
     const client = yt.session.context.client;
+    // visitorData is not decoration: VISIONOS answers LOGIN_REQUIRED without it
+    // and a full-length URL with it, so a session that never got one is worth
+    // seeing in the log rather than inferring from a track that stops.
     trackLog.i(
       `InnerTube ready in ${Math.round(performance.now() - started)}ms ` +
-        `(${client.clientName} ${client.clientVersion}, player ${yt.session.player?.player_id ?? 'none'})`,
+        `(${client.clientName} ${client.clientVersion}, player ${yt.session.player?.player_id ?? 'none'}, ` +
+        `visitorData ${client.visitorData ? `${String(client.visitorData).slice(0, 16)}…` : 'MISSING'})`,
     );
     return yt;
   } catch (error) {
