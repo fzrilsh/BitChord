@@ -140,6 +140,80 @@ async function handleResolve(request: Request, env: Env, url: URL): Promise<Resp
   return json(request, env, { url: current, status: 302 });
 }
 
+/**
+ * Streams one media range, for the case where the phone cannot reach
+ * googlevideo at all.
+ *
+ * This is the fallback, not the normal path: audio is signed for the IP that
+ * asked for it, so a Worker-fetched URL is usually useless to the phone. But
+ * when a network hands the phone an IPv6 address and then routes its traffic
+ * over IPv4, googlevideo answers 302 to a host the element will not follow, and
+ * no client returns a URL that is not IP-bound. Proxying the bytes is then the
+ * only way to play.
+ *
+ * The Worker mints its own player response, so the URL it fetches is signed
+ * for the Worker's own address, and the bytes are streamed straight through.
+ * Only the range the element asks for crosses the Worker.
+ */
+async function handleAudio(request: Request, env: Env, url: URL): Promise<Response> {
+  const videoId = url.searchParams.get('v');
+  if (!videoId || !/^[\w-]{11}$/.test(videoId)) {
+    return json(request, env, { error: 'v must be a video id' }, 400);
+  }
+  // A player response minted here, so the media URL is signed for this Worker.
+  // Several clients are tried: which one YouTube will serve varies by IP and by
+  // time, and the datacenter addresses a Worker uses are refused more often
+  // than a phone's.
+  const clients: [string, string][] = [
+    ['IOS', '20.10.4'],
+    ['ANDROID', '20.10.38'],
+    ['ANDROID_VR', '1.65.10'],
+    ['VISIONOS', '1.02'],
+    ['TVHTML5_SIMPLY', '2.0'],
+    ['MWEB', '2.20260205.04.01'],
+  ];
+  let chosen: { itag?: number; mimeType?: string; url?: string } | undefined;
+  let lastStatus = '';
+  for (const [clientName, clientVersion] of clients) {
+    const headers = youtubeHeaders(MUSIC_ORIGIN);
+    headers.set('Content-Type', 'text/plain;charset=UTF-8');
+    const player = await fetch(`${MUSIC_ORIGIN}/youtubei/v1/player?prettyPrint=false`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        context: { client: { clientName, clientVersion, hl: 'en', gl: 'US' } },
+        videoId,
+        contentCheckOk: true,
+        racyCheckOk: true,
+      }),
+    });
+    const data = (await player.json()) as {
+      playabilityStatus?: { status?: string; reason?: string };
+      streamingData?: { adaptiveFormats?: { itag?: number; mimeType?: string; url?: string }[] };
+    };
+    lastStatus = `${clientName}: ${data.playabilityStatus?.status ?? player.status}`;
+    const formats = (data.streamingData?.adaptiveFormats ?? []).filter(
+      (format) => String(format.mimeType ?? '').startsWith('audio') && format.url,
+    );
+    chosen = formats.find((format) => format.itag === 140) ?? formats[0];
+    if (chosen?.url) break;
+  }
+  if (!chosen?.url) {
+    console.log(`audio ${videoId}: no direct URL (${lastStatus})`);
+    return json(request, env, { error: 'no direct audio for this video' }, 502);
+  }
+
+  const range = request.headers.get('Range');
+  const mediaHeaders = new Headers();
+  if (range) mediaHeaders.set('Range', range);
+  const media = await fetch(chosen.url, { headers: mediaHeaders });
+  const out = new Headers(media.headers);
+  for (const [key, value] of Object.entries(corsHeaders(request, env))) out.set(key, value);
+  out.delete('content-security-policy');
+  out.set('accept-ranges', 'bytes');
+  return new Response(media.body, { status: media.status, headers: out });
+}
+
 async function handleAsset(request: Request, env: Env, url: URL): Promise<Response> {
   const target = url.searchParams.get('u');
   if (!target || !ASSET_ALLOW.some((pattern) => pattern.test(target))) {
@@ -230,6 +304,7 @@ export default {
       if (url.pathname === '/whoami') return await handleWhoami(request, env);
       if (url.pathname === '/asset') return await handleAsset(request, env, url);
       if (url.pathname === '/resolve') return await handleResolve(request, env, url);
+      if (url.pathname === '/audio') return await handleAudio(request, env, url);
       if (url.pathname.startsWith('/yt/')) return await handleSigned(request, env, url);
       return json(request, env, { error: 'not found' }, 404);
     } catch (error) {

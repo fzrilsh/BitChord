@@ -671,15 +671,29 @@ function hasDirectAudio(info: YT.VideoInfo): boolean {
  */
 async function followRedirects(url: URL, videoId: string): Promise<URL> {
   if (!config.workerUrl) return url;
+  const worker = config.workerUrl.replace(/\/+$/, '');
   try {
-    const response = await fetch(
-      `${config.workerUrl.replace(/\/+$/, '')}/resolve?u=${encodeURIComponent(url.toString())}`,
-    );
+    const response = await fetch(`${worker}/resolve?u=${encodeURIComponent(url.toString())}`);
     if (!response.ok) return url;
     const body = (await response.json()) as { url?: string; status?: number };
-    if (!body.url || body.url === url.toString()) return url;
-    trackLog.d(`resolved a googlevideo redirect (${body.status})`, videoId);
-    return new URL(body.url);
+    if (!body.url) return url;
+
+    // 2xx: the URL was reachable as it stood (no redirect, or one followed to
+    // a host that answers) — hand the element the address that worked.
+    if (body.status !== undefined && body.status >= 200 && body.status < 300) {
+      if (body.url === url.toString()) return url;
+      trackLog.d(`resolved a googlevideo redirect (${body.status})`, videoId);
+      return new URL(body.url);
+    }
+
+    // Anything else means no address this device can use: googlevideo answers
+    // 302 when the request arrives from a different address family than the URL
+    // was signed for, and 403 when even the redirect target refuses. Neither
+    // can be followed by a media element, and every client's URL is IP-bound,
+    // so stream the bytes through the Worker instead — it mints its own URL,
+    // signed for itself.
+    trackLog.w(`googlevideo unreachable directly (${body.status ?? '?'}); streaming through the Worker`, videoId);
+    return new URL(`${worker}/audio?v=${encodeURIComponent(videoId)}`);
   } catch {
     // A failed resolve is not fatal: the element gets the original URL, which
     // works whenever there was no redirect to follow.

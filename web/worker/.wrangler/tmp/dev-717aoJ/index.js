@@ -82,6 +82,57 @@ async function handleResolve(request, env, url) {
   return json(request, env, { url: current, status: 302 });
 }
 __name(handleResolve, "handleResolve");
+async function handleAudio(request, env, url) {
+  const videoId = url.searchParams.get("v");
+  if (!videoId || !/^[\w-]{11}$/.test(videoId)) {
+    return json(request, env, { error: "v must be a video id" }, 400);
+  }
+  const clients = [
+    ["IOS", "20.10.4"],
+    ["ANDROID", "20.10.38"],
+    ["ANDROID_VR", "1.65.10"],
+    ["VISIONOS", "1.02"],
+    ["TVHTML5_SIMPLY", "2.0"],
+    ["MWEB", "2.20260205.04.01"]
+  ];
+  let chosen;
+  let lastStatus = "";
+  for (const [clientName, clientVersion] of clients) {
+    const headers = youtubeHeaders(MUSIC_ORIGIN);
+    headers.set("Content-Type", "text/plain;charset=UTF-8");
+    const player = await fetch(`${MUSIC_ORIGIN}/youtubei/v1/player?prettyPrint=false`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        context: { client: { clientName, clientVersion, hl: "en", gl: "US" } },
+        videoId,
+        contentCheckOk: true,
+        racyCheckOk: true
+      })
+    });
+    const data = await player.json();
+    lastStatus = `${clientName}: ${data.playabilityStatus?.status ?? player.status}`;
+    const formats = (data.streamingData?.adaptiveFormats ?? []).filter(
+      (format) => String(format.mimeType ?? "").startsWith("audio") && format.url
+    );
+    chosen = formats.find((format) => format.itag === 140) ?? formats[0];
+    if (chosen?.url) break;
+  }
+  if (!chosen?.url) {
+    console.log(`audio ${videoId}: no direct URL (${lastStatus})`);
+    return json(request, env, { error: "no direct audio for this video" }, 502);
+  }
+  const range = request.headers.get("Range");
+  const mediaHeaders = new Headers();
+  if (range) mediaHeaders.set("Range", range);
+  const media = await fetch(chosen.url, { headers: mediaHeaders });
+  const out = new Headers(media.headers);
+  for (const [key, value] of Object.entries(corsHeaders(request, env))) out.set(key, value);
+  out.delete("content-security-policy");
+  out.set("accept-ranges", "bytes");
+  return new Response(media.body, { status: media.status, headers: out });
+}
+__name(handleAudio, "handleAudio");
 async function handleAsset(request, env, url) {
   const target = url.searchParams.get("u");
   if (!target || !ASSET_ALLOW.some((pattern) => pattern.test(target))) {
@@ -161,6 +212,7 @@ var src_default = {
       if (url.pathname === "/whoami") return await handleWhoami(request, env);
       if (url.pathname === "/asset") return await handleAsset(request, env, url);
       if (url.pathname === "/resolve") return await handleResolve(request, env, url);
+      if (url.pathname === "/audio") return await handleAudio(request, env, url);
       if (url.pathname.startsWith("/yt/")) return await handleSigned(request, env, url);
       return json(request, env, { error: "not found" }, 404);
     } catch (error) {
@@ -217,7 +269,7 @@ var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx)
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// .wrangler/tmp/bundle-Oea2q7/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-skNsdC/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
@@ -249,7 +301,7 @@ function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// .wrangler/tmp/bundle-Oea2q7/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-skNsdC/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;
