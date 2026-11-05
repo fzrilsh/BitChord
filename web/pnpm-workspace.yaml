@@ -13,3 +13,7 @@ minimumReleaseAgeExclude:
 # unapproved install script, so it is declined here, explicitly.
 allowBuilds:
   protobufjs: false
+  # Wrangler's own toolchain (web/worker). Its postinstall fetches the platform
+  # binary; the Worker build needs it, and it never runs in the browser.
+  esbuild: true
+  workerd: true
