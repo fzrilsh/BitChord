@@ -172,16 +172,35 @@ async function handleAudio(request: Request, env: Env, url: URL): Promise<Respon
     ['TVHTML5_SIMPLY', '2.0'],
     ['MWEB', '2.20260205.04.01'],
   ];
+
+  // A signed request when the page has a session: a logged-in player request
+  // is the one YouTube reliably serves from a datacenter address, where every
+  // anonymous client answers LOGIN_REQUIRED ("confirm you're not a bot").
+  //
+  // The session arrives in the query, not in headers: the element fetches this
+  // URL itself, and a media element cannot send custom headers.
+  const cookie = url.searchParams.get('c') ?? request.headers.get('x-bitchord-cookie');
+  const auth = url.searchParams.get('a') ?? request.headers.get('x-bitchord-auth');
+  const authUser = url.searchParams.get('u') ?? request.headers.get('x-goog-authuser');
+
   let chosen: { itag?: number; mimeType?: string; url?: string } | undefined;
   let lastStatus = '';
   for (const [clientName, clientVersion] of clients) {
     const headers = youtubeHeaders(MUSIC_ORIGIN);
     headers.set('Content-Type', 'text/plain;charset=UTF-8');
+    if (cookie && auth) {
+      headers.set('Cookie', cookie);
+      headers.set('Authorization', auth);
+      if (authUser) headers.set('X-Goog-AuthUser', authUser);
+    }
     const player = await fetch(`${MUSIC_ORIGIN}/youtubei/v1/player?prettyPrint=false`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        context: { client: { clientName, clientVersion, hl: 'en', gl: 'US' } },
+        context: {
+          client: { clientName, clientVersion, hl: 'en', gl: 'US' },
+          ...(cookie && auth && { user: {} }),
+        },
         videoId,
         contentCheckOk: true,
         racyCheckOk: true,

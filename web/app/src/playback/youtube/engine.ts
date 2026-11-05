@@ -669,6 +669,33 @@ function hasDirectAudio(info: YT.VideoInfo): boolean {
  * Without a Worker (the extension build), the URL is used as it is: the
  * extension's rules already make googlevideo answer directly there.
  */
+/**
+ * The captured session, as query parameters for the Worker's audio fallback.
+ *
+ * A media element cannot send custom headers, so the cookie and the signature
+ * travel in the URL — only ever to the user's own Worker, over HTTPS. This is
+ * the one case where a signed request is what makes playback possible at all:
+ * anonymous player requests from a datacenter address are refused outright
+ * ("confirm you're not a bot"), while a signed one is served.
+ *
+ * Empty when there is no session; the Worker then tries anonymous clients.
+ */
+async function sessionQuery(): Promise<string> {
+  try {
+    const { loadSession } = await import('@/auth/bookmarklet/storage');
+    const { parseSigningSecret, sapisidHash } = await import('@/auth/bookmarklet/sapisidHash');
+    const session = await loadSession();
+    if (!session?.loggedIn) return '';
+    const secret = parseSigningSecret(session.cookie);
+    if (!secret) return '';
+    const params = new URLSearchParams({ c: session.cookie, a: await sapisidHash(secret) });
+    if (session.authUser) params.set('u', session.authUser);
+    return `&${params.toString()}`;
+  } catch {
+    return '';
+  }
+}
+
 async function followRedirects(url: URL, videoId: string): Promise<URL> {
   if (!config.workerUrl) return url;
   const worker = config.workerUrl.replace(/\/+$/, '');
@@ -693,7 +720,7 @@ async function followRedirects(url: URL, videoId: string): Promise<URL> {
     // so stream the bytes through the Worker instead — it mints its own URL,
     // signed for itself.
     trackLog.w(`googlevideo unreachable directly (${body.status ?? '?'}); streaming through the Worker`, videoId);
-    return new URL(`${worker}/audio?v=${encodeURIComponent(videoId)}`);
+    return new URL(`${worker}/audio?v=${encodeURIComponent(videoId)}${await sessionQuery()}`);
   } catch {
     // A failed resolve is not fatal: the element gets the original URL, which
     // works whenever there was no redirect to follow.
