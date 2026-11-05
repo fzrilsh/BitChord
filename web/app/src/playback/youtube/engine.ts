@@ -335,6 +335,10 @@ export class YouTubeEngine {
     // supported", even though the URL was already usable.
     const raw = chosen.url ?? '';
     const needsDecipher = !raw || raw.includes('&n=') || raw.includes('?n=') || Boolean(chosen.signature_cipher || chosen.cipher);
+    trackLog.d(
+      `${client} url: direct=${Boolean(raw)} n=${/[?&]n=/.test(raw)} cipher=${Boolean(chosen.signature_cipher || chosen.cipher)} → decipher ${needsDecipher ? 'YES' : 'no'}`,
+      videoId,
+    );
     let url: URL;
     if (needsDecipher) {
       try {
@@ -358,15 +362,22 @@ export class YouTubeEngine {
     // unusable, so a stale error would refuse this source too.
     this.audio.removeAttribute('src');
     this.audio.load();
+    trackLog.d(`${client} src set (${url.hostname}, itag ${chosen.itag})`, videoId);
     this.audio.src = url.toString();
 
     if (autoplay) {
-      await this.audio.play().catch((error: unknown) => {
+      try {
+        await this.audio.play();
+      } catch (error) {
         if (error instanceof DOMException && error.name === 'NotAllowedError') {
           trackLog.w('autoplay was blocked by the browser; waiting for a tap', videoId);
-        } else throw error;
-      });
+        } else {
+          trackLog.w(`${client} play() failed: ${String(error)} (media error ${this.audio.error?.code ?? 'none'})`, videoId);
+          throw error;
+        }
+      }
     }
+    trackLog.d(`${client} waiting for first audio`, videoId);
     await this.firstAudio(generation);
     if (startSec > 0) this.audio.currentTime = startSec;
     this.checkCurrent(generation);
@@ -552,17 +563,29 @@ export class YouTubeEngine {
     const audio = this.audio;
     if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) return Promise.resolve();
     return new Promise((resolve, reject) => {
-      const done = () => {
+      const finish = (error: Error | null) => {
         clearTimeout(timer);
-        audio.removeEventListener('canplay', done);
-        if (generation !== this.generation) reject(new SupersededError('Replaced by a newer load'));
+        audio.removeEventListener('canplay', onCanPlay);
+        audio.removeEventListener('error', onError);
+        if (error) reject(error);
+        else if (generation !== this.generation) reject(new SupersededError('Replaced by a newer load'));
         else resolve();
       };
-      const timer = setTimeout(() => {
-        audio.removeEventListener('canplay', done);
-        reject(new Error(`no audio within ${FIRST_AUDIO_TIMEOUT_MS / 1000}s`));
-      }, FIRST_AUDIO_TIMEOUT_MS);
-      audio.addEventListener('canplay', done);
+      // The element's own error arrives long before the timeout, and says why.
+      const onError = () =>
+        finish(
+          new Error(
+            `the element refused this URL: media error ${audio.error?.code ?? '?'} ${audio.error?.message ?? ''} ` +
+              `(networkState ${audio.networkState}, readyState ${audio.readyState})`,
+          ),
+        );
+      const onCanPlay = () => finish(null);
+      const timer = setTimeout(
+        () => finish(new Error(`no audio within ${FIRST_AUDIO_TIMEOUT_MS / 1000}s (networkState ${audio.networkState}, readyState ${audio.readyState})`)),
+        FIRST_AUDIO_TIMEOUT_MS,
+      );
+      audio.addEventListener('canplay', onCanPlay);
+      audio.addEventListener('error', onError);
     });
   }
 

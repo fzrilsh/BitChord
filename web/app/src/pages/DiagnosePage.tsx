@@ -50,10 +50,64 @@ function mediaElement(): HTMLAudioElement | null {
   return document.querySelector('audio');
 }
 
+/**
+ * Tests a URL in a fresh element, outside the player, and reports exactly what
+ * this browser does with it. This is the one thing that separates "the URL is
+ * wrong" from "the element refuses this URL": the player's own error cannot.
+ */
+async function testUrl(raw: string): Promise<string> {
+  const lines: string[] = [];
+  const el = document.createElement('audio');
+  el.setAttribute('playsinline', '');
+  el.style.display = 'none';
+  document.body.appendChild(el);
+  lines.push(`url: ${raw.slice(0, 120)}…`);
+  lines.push(`c= ${/[?&]c=([^&]*)/.exec(raw)?.[1] ?? '(none)'}`);
+  lines.push(`has n= ${/[?&]n=/.test(raw)}`);
+
+  // HEAD first, exactly as the element would see it.
+  try {
+    const head = await fetch(raw, { method: 'HEAD' });
+    lines.push(`HEAD: ${head.status} ${head.headers.get('content-type') ?? ''}`);
+  } catch (e) {
+    lines.push(`HEAD: blocked (${e instanceof Error ? e.message : String(e)})`);
+  }
+
+  el.src = raw;
+  const outcome = await new Promise<string>((resolve) => {
+    const timer = setTimeout(
+      () => resolve(`timeout · readyState ${el.readyState} networkState ${el.networkState}`),
+      12_000,
+    );
+    el.addEventListener(
+      'loadedmetadata',
+      () => {
+        clearTimeout(timer);
+        resolve(`loadedmetadata ✅ duration ${el.duration}`);
+      },
+      { once: true },
+    );
+    el.addEventListener(
+      'error',
+      () => {
+        clearTimeout(timer);
+        resolve(`error ${el.error?.code} ${el.error?.message ?? ''} (networkState ${el.networkState})`);
+      },
+      { once: true },
+    );
+    el.load();
+  });
+  lines.push(`element: ${outcome}`);
+  el.remove();
+  return lines.join('\n');
+}
+
 export default function DiagnosePage() {
   const [lines, setLines] = useState<string[]>([]);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [copied, setCopied] = useState(false);
+  const [urlTest, setUrlTest] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
   const captured = useRef<string[]>([]);
   const status = usePlayer((s) => s.status);
   const error = usePlayer((s) => s.error);
@@ -130,6 +184,10 @@ export default function DiagnosePage() {
     '--- player log ---',
     ...trackLines.slice(-60).map((line) => `${(line.t / 1000).toFixed(2)} ${line.level} ${line.about ?? ''} ${line.message}`),
     '',
+    '',
+    '--- url test ---',
+    urlTest ?? '(not run)',
+    '',
     '--- page log ---',
     ...captured.current,
   ].join('\n');
@@ -177,6 +235,27 @@ export default function DiagnosePage() {
 
         <h2 className="mt-6 mb-2 type-subhead-emphasized uppercase text-secondary">src</h2>
         <pre className="overflow-x-auto rounded-[10px] bg-quinary p-3 type-callout [word-break:break-all]">{snapshot?.src}</pre>
+
+        <div className="mt-3 flex gap-2">
+          <button
+            className="rounded-pill bg-key px-4 py-2 type-body-emphasized text-white disabled:opacity-40"
+            disabled={!snapshot?.src || snapshot.src === '(none)' || testing}
+            onClick={() => {
+              if (!snapshot?.src) return;
+              setTesting(true);
+              setUrlTest(null);
+              void testUrl(snapshot.src).then((result) => {
+                setUrlTest(result);
+                setTesting(false);
+              });
+            }}
+          >
+            {testing ? 'Testing…' : 'Test this URL in a fresh element'}
+          </button>
+        </div>
+        {urlTest && (
+          <pre className="mt-3 overflow-x-auto rounded-[10px] bg-quinary p-3 type-callout [word-break:break-all]">{urlTest}</pre>
+        )}
 
         <h2 className="mt-6 mb-2 type-subhead-emphasized uppercase text-secondary">Log</h2>
         <ol className="max-h-[420px] overflow-auto rounded-[10px] bg-quinary px-3 py-2.5 [font:400_12px/18px_ui-monospace,Menlo,Consolas,monospace]">
