@@ -12,6 +12,7 @@ import { isMobileBrowser, isPureWeb } from '@/lib/platform';
 import { useUi } from '@/state/ui';
 import { useKeyboardShortcuts } from './useKeyboardShortcuts';
 import { Banner, bannerButtonClass } from './Banner';
+import { MobilePlayerBar } from './MobilePlayerBar';
 import { MobileTopBar } from './MobileTopBar';
 import { PlayerBar } from './PlayerBar';
 import { SidePanel } from './SidePanel';
@@ -84,12 +85,15 @@ export function AppShell() {
           id="scrollable-page"
           className="absolute inset-0 overflow-x-hidden overflow-y-auto pl-(--web-navigation-width) [scrollbar-gutter:stable] data-tint:bg-(--page-tint) data-tint:transition-[background-color] data-tint:duration-300 data-tint:ease-in max-sm:pt-(--mobile-top-bar-height) max-sm:pl-0"
         >
-          {/* Clears the floating pill: its height, its offset, and some air. */}
-          <div className="min-h-full pb-[calc(var(--player-pill-height)+var(--player-bottom-offset)+40px)]">
+          {/* Clears the floating pill: its height, its offset, and some air. On a
+              phone the pill sits closer to the edge, so the mobile bar's own
+              height is reserved instead. */}
+          <div className="min-h-full pb-[calc(var(--player-pill-height)+var(--player-bottom-offset)+40px)] max-sm:pb-[calc(60px+12px+24px)]">
             <Outlet />
           </div>
         </main>
         <PlayerBar />
+        <MobilePlayerBar />
         <SidePanel />
       </div>
       {banner}
