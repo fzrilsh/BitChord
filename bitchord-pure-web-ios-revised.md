@@ -79,6 +79,10 @@ elements send. IOS/ANDROID URLs stop around 1.2 MB (~70 s) — the same wall the
 project already documented in `web/docs/youtube-playback.md`. VISIONOS offers
 AAC 140 as well as Opus, so Safari's media element has a codec it can decode.
 
+**VISIONOS only answers like this with the device's own visitorData** — see the
+signed-playback note below. With one minted for another IP it answers
+`LOGIN_REQUIRED`, which is what the first builds hit.
+
 From a Cloudflare datacenter IP, VISIONOS/ANDROID_VR/TV get
 `LOGIN_REQUIRED: Sign in to confirm you're not a bot`, while **IOS** and **ANDROID**
 still answer `OK` — but their URLs are then bound to the Worker's IP. So the Worker
@@ -225,10 +229,32 @@ The Worker therefore does see the session cookies — that has to be stated plai
 in the product's privacy copy, replacing the original plan's "cookies never leave
 the device".
 
-**Still unmeasured:** whether a *signed* player response mints URLs the device can
-play. Signed playback needs the web clients (WEB_REMIX), and their URLs were
-measured to stop at ~1.2 MB — so signed audio may have to be proxied through the
-Worker. Do not build the signed playback path before measuring this.
+**Answered 2026-11-05 — `visitorData`, not signing, decides it.** A signed
+player response changes nothing: the web clients still answer SABR or a URL that
+needs the player script, which iOS refuses. What decides whether the device gets
+a full-length URL is the *visitorData*.
+
+| visitorData | VISIONOS | ranges 0 / mid / tail |
+|---|---|---|
+| the device's own | `OK` | `206 / 206 / 206` |
+| one minted for another IP | `LOGIN_REQUIRED` | no URL |
+
+YouTube binds a visitorData to the address that asked for it. The session
+bootstrap (`/sw.js_data`) has to come through the Worker — it carries no ACAO,
+so neither the page nor a sandboxed iframe can read it (WebKit: "Load failed") —
+which means the visitorData inside it belongs to Cloudflare's IP. Presenting it
+from the phone is what produced `LOGIN_REQUIRED` on VISIONOS, and the fallback
+to IOS/ANDROID is what produced the ~1 MiB (~70 s) cutoff.
+
+The fix is one sandboxed `youtubei` call per page: its `responseContext`
+carries a visitorData minted for the device. `deviceVisitorData()` caches it and
+puts it on the session, which is the only place YouTube.js reads it from
+(`HTTPClient#processJsonPayload` discards any `context` in the body and
+substitutes `session.context`).
+
+Verified end to end in WebKit against the deployed build: `playing via VISIONOS,
+140 aac 131kbps direct`, duration 427 s, `readyState 4`, and a seek to 120 s
+continues (`t=126.6`).
 
 ---
 
@@ -248,52 +274,54 @@ Remaining unknowns, both deferred to phase 3:
 - Whether the sandbox can mint a **signed** player response (see the open question).
 - Whether BotGuard/PO tokens are needed for age-gated tracks.
 
-### Phase 1 — anonymous playback (no Worker required for audio)
+### Phase 1 — anonymous playback ✅ DONE
 
-- [ ] `web/app/src/youtube/sandbox/` — an iframe host + typed RPC
-      (`browse`, `search`, `player`, `suggestions`), request/response correlation,
-      timeouts, and a single `sandbox.html` served as a static asset.
-- [ ] `innertube.ts`: a third fetch path. YouTube.js's `fetch` cannot be used
-      directly (it would run in the page origin); instead either
-      (a) run YouTube.js **inside** the sandbox and expose its parsed results, or
-      (b) keep YouTube.js out and call InnerTube directly, porting the mappers.
-      Decide with a small experiment; (a) reuses all existing mappers.
-- [ ] Player path: force `VISIONOS`, select AAC 140 when
-      `canPlayType('audio/mp4; codecs="mp4a.40.2"')`, keep Opus for MSE browsers.
-- [ ] **iOS playback must use a plain `<audio>` element with the direct URL**,
-      not Shaka. googlevideo sends no ACAO, so Shaka's fetch-based loader is
-      refused from the app's origin even though the media element works.
-      `engine.ts` already builds a DASH manifest over direct URLs; on iOS, bypass
-      it and hand the `<audio>` element the single selected rendition instead.
-- [ ] `useYouTubeReady()`: ready when `sandbox available` OR extension present.
-- [ ] `States.tsx` / `AppShell.tsx`: drop the "Get the App" banner when the
-      sandbox path is available.
+- [x] `web/app/src/playback/youtube/sandbox/` — iframe host + typed RPC, a
+      single `sandbox.html` static asset.
+- [x] `innertube.ts`: a third fetch path. YouTube.js is kept; only its `fetch`
+      is swapped for the sandbox one, so every existing mapper is reused.
+- [x] Player path: direct `<audio>` on iOS, AAC 140, no Shaka.
+- [x] `useYouTubeReady()`, `States.tsx`, `AppShell.tsx`.
 
-### Phase 2 — the two proxied assets
+Two things this phase got wrong at first, both fixed and now covered by tests:
 
-- [ ] `web/worker/`: a Cloudflare Worker with `/asset?u=` (allow-listed to
-      `www.youtube.com/sw.js_data` and `/s/player/…`), immutable caching, and no
-      logging of URLs.
-- [ ] `config.ts`: `VITE_WORKER_URL`, optional (build must still work without it).
+- **The Worker must not gate the media URL.** It was asked to "check" each
+  googlevideo URL first; it fetches from Cloudflare's address, so a URL signed
+  for the phone answered 403 there every time and the valid URL was discarded.
+  The element now gets the device's own URL, and `/audio` is only a fallback.
+- **The player request needs the device's visitorData** (see above). Without it
+  VISIONOS answers LOGIN_REQUIRED and playback falls to IOS, which stops at
+  ~1 MiB.
 
-### Phase 3 — sign-in
+### Phase 2 — the two proxied assets ✅ DONE
 
-- [ ] Bookmarklet generator (proven), `/capture` receiver (proven), AES-GCM
-      IndexedDB storage, `sapisidHash.ts`.
-- [ ] `workerSignedFetch`: POST the request to the Worker with the cookie jar in
-      a custom header; the Worker sets `Cookie` + `Origin` and forwards. Never log
-      either header, and say in the privacy copy that the Worker relays them.
-- [ ] **Measure first:** does a signed WEB_REMIX player response give a URL the
-      device can play for the whole track? Its URLs were measured to stop at
-      ~1.2 MB. If they do stop, signed playback needs Worker byte-proxying — decide
-      then whether that is acceptable, before building it.
+- [x] `web/worker/`: `/asset?u=`, allow-listed, immutable caching, no URL logging.
+- [x] `config.ts`: `VITE_WORKER_URL`, optional.
 
-### Phase 4 — port the app-side plumbing
+### Phase 3 — sign-in ✅ DONE
 
-- [ ] `useYtAuth.readAuth()`: bookmarklet session path.
-- [ ] `routes.tsx` + `pageRegistry.tsx`: `/sign-in`.
-- [ ] `platform.ts`: `isIOS()`.
-- [ ] `vite.config.ts`: relax `VITE_PARTY_SERVER_URL` for a mobile-only build.
+- [x] Bookmarklet generator, `/capture` receiver, AES-GCM IndexedDB storage,
+      `sapisidHash.ts`.
+- [x] `workerSignedFetch`: the Worker sets `Cookie` + `Origin` and forwards.
+- [x] Session transfer for the Home Screen app (separate storage on iOS).
+- [x] Measured: signed playback does **not** unlock full-length URLs; the
+      visitorData does. The signed path is for browsing and account state.
+
+### Phase 4 — app-side plumbing ✅ DONE
+
+- [x] `useYtAuth.readAuth()`: bookmarklet session path.
+- [x] `routes.tsx` + `pageRegistry.tsx`: `/sign-in`, `/capture`, `/diagnose`.
+- [x] `platform.ts`: `isIOS()`.
+- [x] `vite.config.ts`: `VITE_REQUIRE_PARTY_SERVER=false`.
+- [x] `createHashRouter`, `VITE_BASE_URL=/BitChord/`, Pages workflow.
+
+### Still open
+
+- [ ] The Worker's `/audio` byte proxy is a fallback that has never been needed
+      on a real device. Keep it, but it is not on the working path.
+- [ ] Age-gated tracks: whether BotGuard/PO tokens are needed once signed in.
+- [ ] Desktop (extension) playback is unaffected but untested against the new
+      resolver order.
 
 ---
 

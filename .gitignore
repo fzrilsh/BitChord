@@ -50,3 +50,6 @@ AGENTS.md
 
 # Claude Code session files (launch configs, worktrees)
 .claude/
+
+# Wrangler build output (regenerated on every dev run)
+web/worker/.wrangler/
