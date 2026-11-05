@@ -10,6 +10,7 @@ import { isIOS } from '@/lib/platform';
 import { getInnertube, getSignedInnertube } from './innertube';
 import {
   CLIENT_ATTEMPTS,
+  DIRECT_ATTEMPTS,
   usesWebPo,
   excludeClient,
   playerRequest,
@@ -186,7 +187,8 @@ export class YouTubeEngine {
       let lastError: unknown = null;
       let yt = this.yt;
       let signed = false;
-      for (let attempt = 0; attempt < CLIENT_ATTEMPTS; attempt++) {
+      const attempts = this.directOnly ? DIRECT_ATTEMPTS : CLIENT_ATTEMPTS;
+      for (let attempt = 0; attempt < attempts; attempt++) {
         let resolved: ResolvedPlayer;
         try {
           resolved = await timed('player request', videoId, () => resolvePlayer(yt, videoId, skip, signed, this.directOnly));
@@ -322,7 +324,18 @@ export class YouTubeEngine {
       audio?.[0];
     if (!chosen) throw new Error('No direct audio URL in this player response');
 
-    const url = new URL(await chosen.decipher(resolved.yt.session.player!));
+    // A URL with `n=` has to be run through the player script first, and that
+    // is what fails on iOS ("the operation is not supported"): the script the
+    // decipher needs is evaluated with `new Function`, which WebKit refuses in
+    // some contexts. The phone clients (IOS, ANDROID) hand back URLs with no
+    // `n` at all, so there is nothing to decipher — throwing here lets the
+    // walk move on to one of those instead of failing the track.
+    let url: URL;
+    try {
+      url = new URL(await chosen.decipher(resolved.yt.session.player!));
+    } catch (error) {
+      throw new Error(`could not decipher this client's URL (${String(error)})`);
+    }
     if (usesWebPo(client)) {
       const pot = await botguard.mint(videoId);
       if (pot) url.searchParams.set('pot', pot);

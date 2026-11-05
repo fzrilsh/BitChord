@@ -27,6 +27,10 @@ export type PlayerClientName = (typeof CLIENT_ORDER)[number];
  * dropped. VISIONOS, IOS, ANDROID and YTMUSIC all answer directly.
  */
 export const DIRECT_ORDER = ['VISIONOS', 'IOS', 'ANDROID', 'YTMUSIC', 'WEB'] as const;
+// The order matters: VISIONOS first (full-track direct URLs), then the phone
+// clients, whose URLs carry no `n` and so need no deciphering at all. YTMUSIC
+// and WEB come last because their URLs must be run through the player script,
+// which iOS refuses ("the operation is not supported").
 export type DirectClientName = (typeof DIRECT_ORDER)[number];
 
 /** Every client either order can name: the SABR set plus the phone clients. */
@@ -54,6 +58,8 @@ async function playerRequestToken(yt: Innertube, client: string): Promise<string
 
 /** StreamResolver: how many clients are worth trying for one track. */
 export const CLIENT_ATTEMPTS = 3;
+/** The direct path's limit: it has to reach the phone clients, which need no deciphering. */
+export const DIRECT_ATTEMPTS = 6;
 /** InnerTubeXResolver.EXCLUDE_MS: a client that refused a track sits out for this long. */
 const EXCLUDE_MS = 10 * 60_000;
 /** StreamResolver.UNPLAYABLE_TTL_MS: a settled "no" isn't asked again for this long. */
@@ -265,7 +271,12 @@ export async function resolvePlayer(
   if (known) throw new UnplayableError(known.reason, known.ageGated);
 
   const { Utils, YT } = await import('youtubei.js/web');
-  const candidates = clientsFor(videoId, signed, direct).filter((c) => !skip.has(c)).slice(0, CLIENT_ATTEMPTS);
+  // The direct path has more clients worth trying: on iOS a client whose URL
+  // needs deciphering fails at the streaming step, and only the phone clients
+  // (IOS, ANDROID) return URLs that need none. Trying only the first three
+  // would never reach them.
+  const limit = direct ? DIRECT_ATTEMPTS : CLIENT_ATTEMPTS;
+  const candidates = clientsFor(videoId, signed, direct).filter((c) => !skip.has(c)).slice(0, limit);
   let lastReason = 'No YouTube client would play this track';
   let permanent: string | null = null;
   let ageGated = false;
