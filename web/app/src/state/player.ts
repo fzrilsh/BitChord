@@ -184,6 +184,7 @@ function getDecks(): Promise<Deck[]> {
     decks = [0, 1].map((n) => {
       const audio = new Audio();
       audio.preload = 'auto';
+      audio.setAttribute('playsinline', '');
       // Media from another origin is silent inside an AudioContext unless it
       // is fetched with CORS (prompt §6, the Web Audio caveat).
       //
@@ -191,6 +192,13 @@ function getDecks(): Promise<Deck[]> {
       // omits. Without it, a crossOrigin element must satisfy CORS and the
       // stream is refused, so the direct path leaves the attribute off.
       if (getBridge()) audio.crossOrigin = 'anonymous';
+      // iOS Safari will not load media for an element that is not in the
+      // document: `duration` stays 0 and nothing plays, however often `play()`
+      // is called. Desktop browsers do not care, which is why this only showed
+      // up on a phone. The element is invisible; it is in the DOM only to be
+      // allowed to play.
+      audio.style.display = 'none';
+      document.body.appendChild(audio);
       const engine = new YouTubeEngine(audio);
       const deck: Deck = { engine, audio, gain: 1 };
       engine.onFatal = (videoId, message) => {
