@@ -150,6 +150,11 @@ interface Deck {
 const SILENCE =
   'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
 
+/** How many tracks AutoPlay may skip in a row before it gives up. */
+const MAX_AUTO_SKIPS = 3;
+/** Consecutive AutoPlay skips; reset when a track starts. */
+let skipsInARow = 0;
+
 let decks: Deck[] | null = null;
 let decksPromise: Promise<Deck[]> | null = null;
 /** The two media elements, made on the first tap (see createElements). */
@@ -766,6 +771,7 @@ async function startAt(at: number, { startSec = 0, auto = false, autoplay = true
     const track = await deck.engine.load(entry.track.videoId, { startSec, autoplay });
     if (token !== loadToken) return;
     applyTrack(track, entry.track);
+    skipsInARow = 0;
     if (!autoplay) usePlayer.setState({ status: 'paused' });
     afterTrackStarted();
     syncAutomix();
@@ -773,12 +779,19 @@ async function startAt(at: number, { startSec = 0, auto = false, autoplay = true
     if (token !== loadToken || (error instanceof Error && error.name === 'SupersededError')) return;
     const message = error instanceof Error ? error.message : String(error);
     usePlayer.setState({ status: 'error', error: message });
-    // A track the player reached on its own that can't play is skipped, as on the phone.
-    if (auto && planNext(true)) {
+    // A track the player reached on its own that can't play is skipped, as on
+    // the phone — but only a few times. Every track failing the same way (no
+    // client would stream) would otherwise walk the whole AutoPlay queue in a
+    // tight loop, each attempt logged and none audible.
+    if (auto && planNext(true) && skipsInARow < MAX_AUTO_SKIPS) {
+      skipsInARow++;
       trackLog.w(`skipping: ${message}`, entry.track.videoId);
       setTimeout(() => {
         if (token === loadToken) void advance(true);
       }, 1500);
+    } else if (auto) {
+      skipsInARow = 0;
+      trackLog.w(`stopping after ${MAX_AUTO_SKIPS} tracks could not play: ${message}`, entry.track.videoId);
     }
   }
 }

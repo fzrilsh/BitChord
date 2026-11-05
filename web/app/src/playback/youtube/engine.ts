@@ -324,17 +324,26 @@ export class YouTubeEngine {
       audio?.[0];
     if (!chosen) throw new Error('No direct audio URL in this player response');
 
-    // A URL with `n=` has to be run through the player script first, and that
-    // is what fails on iOS ("the operation is not supported"): the script the
-    // decipher needs is evaluated with `new Function`, which WebKit refuses in
-    // some contexts. The phone clients (IOS, ANDROID) hand back URLs with no
-    // `n` at all, so there is nothing to decipher — throwing here lets the
-    // walk move on to one of those instead of failing the track.
+    // Decipher only when there is something to decipher.
+    //
+    // A URL needs the player script for two things: a `signatureCipher` (an
+    // `s=` to unscramble) and an `n=` to transform. The phone clients (IOS,
+    // ANDROID) return a plain `url` with `sig=` already applied and no `n`, so
+    // there is nothing to do — and running it through the decipher anyway is
+    // what fails on iOS: YouTube.js evaluates the player script with
+    // `new Function`, which WebKit refuses with "the operation is not
+    // supported", even though the URL was already usable.
+    const raw = chosen.url ?? '';
+    const needsDecipher = !raw || raw.includes('&n=') || raw.includes('?n=') || Boolean(chosen.signature_cipher || chosen.cipher);
     let url: URL;
-    try {
-      url = new URL(await chosen.decipher(resolved.yt.session.player!));
-    } catch (error) {
-      throw new Error(`could not decipher this client's URL (${String(error)})`);
+    if (needsDecipher) {
+      try {
+        url = new URL(await chosen.decipher(resolved.yt.session.player!));
+      } catch (error) {
+        throw new Error(`could not decipher this client's URL (${String(error)})`);
+      }
+    } else {
+      url = new URL(raw);
     }
     if (usesWebPo(client)) {
       const pot = await botguard.mint(videoId);
