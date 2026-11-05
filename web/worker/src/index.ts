@@ -106,6 +106,36 @@ function youtubeHeaders(origin: string): Headers {
   return headers;
 }
 
+/**
+ * Follows a googlevideo URL's redirects and returns the address it ends at.
+ *
+ * googlevideo answers a media URL with a 302 when the request reaches it from a
+ * different address family than the one the URL was signed for (a phone on
+ * IPv6 whose connection falls back to IPv4). Safari refuses to follow that
+ * redirect for a media element, so the element must be handed the final URL.
+ *
+ * Only googlevideo hosts are followed, and only the `Location` is read: no
+ * media bytes pass through here.
+ */
+async function handleResolve(request: Request, env: Env, url: URL): Promise<Response> {
+  const target = url.searchParams.get('u');
+  if (!target || !/^https:\/\/[a-z0-9-]+\.googlevideo\.com\//.test(target)) {
+    return json(request, env, { error: 'u must be a googlevideo URL' }, 400);
+  }
+  // A range of one byte: enough to see the redirect, not enough to move audio.
+  let current = target;
+  for (let hop = 0; hop < 3; hop++) {
+    const response = await fetch(current, { method: 'HEAD', redirect: 'manual' });
+    if (response.status < 300 || response.status >= 400) {
+      return json(request, env, { url: current, status: response.status });
+    }
+    const location = response.headers.get('Location');
+    if (!location) return json(request, env, { url: current, status: response.status });
+    current = new URL(location, current).toString();
+  }
+  return json(request, env, { url: current, status: 302 });
+}
+
 async function handleAsset(request: Request, env: Env, url: URL): Promise<Response> {
   const target = url.searchParams.get('u');
   if (!target || !ASSET_ALLOW.some((pattern) => pattern.test(target))) {
@@ -195,6 +225,7 @@ export default {
       if (url.pathname === '/health') return json(request, env, { ok: true });
       if (url.pathname === '/whoami') return await handleWhoami(request, env);
       if (url.pathname === '/asset') return await handleAsset(request, env, url);
+      if (url.pathname === '/resolve') return await handleResolve(request, env, url);
       if (url.pathname.startsWith('/yt/')) return await handleSigned(request, env, url);
       return json(request, env, { error: 'not found' }, 404);
     } catch (error) {

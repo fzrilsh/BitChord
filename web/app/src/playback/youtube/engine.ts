@@ -4,6 +4,7 @@ import shaka from 'shaka-player/dist/shaka-player.compiled';
 import { Constants, Utils, YT, type Innertube } from 'youtubei.js/web';
 import { timed, trackLog } from '../trackLog';
 import { botguard } from './botguard';
+import { config } from '@/config';
 import { getBridge } from '@/extension/bridge';
 import { ytAuthSnapshot } from '@/extension/useYtAuth';
 import { isIOS } from '@/lib/platform';
@@ -355,6 +356,13 @@ export class YouTubeEngine {
     }
 
     this.checkCurrent(generation);
+    // googlevideo answers a 302 when the connection reaches it from a different
+    // address family than the URL was signed for — a phone whose network is
+    // IPv6 but whose request falls back to IPv4. Safari does not follow that
+    // redirect for a media element (SRC_NOT_SUPPORTED), so ask the Worker
+    // where it ends and hand the element that address instead.
+    const finalUrl = await followRedirects(url, videoId);
+
     // crossOrigin is deliberately absent: with it set, the element must satisfy
     // CORS, which googlevideo does not offer. player.ts omits it on iOS.
     this.audio.removeAttribute('crossorigin');
@@ -362,8 +370,8 @@ export class YouTubeEngine {
     // unusable, so a stale error would refuse this source too.
     this.audio.removeAttribute('src');
     this.audio.load();
-    trackLog.d(`${client} src set (${url.hostname}, itag ${chosen.itag})`, videoId);
-    this.audio.src = url.toString();
+    trackLog.d(`${client} src set (${finalUrl.hostname}, itag ${chosen.itag})`, videoId);
+    this.audio.src = finalUrl.toString();
 
     if (autoplay) {
       try {
@@ -647,6 +655,36 @@ function codecName(codec: string | null): string | null {
 /** Whether the response carries audio URLs to fetch directly (VISIONOS does; the web clients only offer SABR). */
 function hasDirectAudio(info: YT.VideoInfo): boolean {
   return !!info.streaming_data?.adaptive_formats.some((f) => f.has_audio && !f.has_video && (f.url || f.signature_cipher || f.cipher));
+}
+
+/**
+ * The address a googlevideo URL finally lands on, asking the Worker to follow
+ * the redirects.
+ *
+ * A media element will not follow a cross-host redirect on iOS, and googlevideo
+ * answers one whenever the URL was signed for a different address family than
+ * the one the request arrives on. Resolving it here costs one small request and
+ * makes the element's source a plain 206.
+ *
+ * Without a Worker (the extension build), the URL is used as it is: the
+ * extension's rules already make googlevideo answer directly there.
+ */
+async function followRedirects(url: URL, videoId: string): Promise<URL> {
+  if (!config.workerUrl) return url;
+  try {
+    const response = await fetch(
+      `${config.workerUrl.replace(/\/+$/, '')}/resolve?u=${encodeURIComponent(url.toString())}`,
+    );
+    if (!response.ok) return url;
+    const body = (await response.json()) as { url?: string; status?: number };
+    if (!body.url || body.url === url.toString()) return url;
+    trackLog.d(`resolved a googlevideo redirect (${body.status})`, videoId);
+    return new URL(body.url);
+  } catch {
+    // A failed resolve is not fatal: the element gets the original URL, which
+    // works whenever there was no redirect to follow.
+    return url;
+  }
 }
 
 /** googlevideo saying no to this client, as opposed to pacing or a network blip. */
