@@ -42,6 +42,7 @@ export const pages: PageRoute[] = [
   { path: '/sign-in', load: () => import('@/pages/SignInPage'), skeleton: <PlainSkeleton /> },
   { path: '/capture', load: () => import('@/pages/CapturePage'), skeleton: <PlainSkeleton /> },
   { path: '/debug', load: () => import('@/pages/DebugPage'), skeleton: <PlainSkeleton /> },
+  { path: '/diagnose', load: () => import('@/pages/DiagnosePage'), skeleton: <PlainSkeleton /> },
 ];
 
 export const notFound: PageRoute = { path: '*', load: () => import('@/pages/NotFoundPage'), skeleton: <PlainSkeleton /> };
