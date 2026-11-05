@@ -14,7 +14,6 @@ import { botguard } from './botguard';
  * so those two are left out. googlevideo's own SABR example uses VISIONOS.
  */
 export const CLIENT_ORDER = ['VISIONOS', 'YTMUSIC', 'WEB', 'MWEB'] as const;
-export type PlayerClientName = (typeof CLIENT_ORDER)[number];
 
 /**
  * The order for the direct-URL path: iOS, and every browser without the
@@ -34,7 +33,14 @@ export const DIRECT_ORDER = ['VISIONOS', 'IOS', 'ANDROID', 'YTMUSIC', 'WEB'] as 
 export type DirectClientName = (typeof DIRECT_ORDER)[number];
 
 /** Every client either order can name: the SABR set plus the phone clients. */
-export type AnyClientName = PlayerClientName | DirectClientName;
+export type AnyClientName = (typeof CLIENT_ORDER)[number] | DirectClientName;
+
+/**
+ * Any client a walk can return. The two orders overlap but neither contains the
+ * other — WEB is not on the direct path and IOS is not on the SABR one — so the
+ * name is their union, not one of them.
+ */
+export type PlayerClientName = AnyClientName;
 
 /**
  * The BotGuard (WebPO) clients. As on Android (PoTokenGenerator /
@@ -181,10 +187,10 @@ export function clientsFor(videoId: string, signed = false, direct = false): Pla
   const now = Date.now();
   const order: readonly PlayerClientName[] = signed
     ? direct
-      ? (SIGNED_DIRECT_ORDER as readonly PlayerClientName[])
+      ? SIGNED_DIRECT_ORDER
       : SIGNED_ORDER
     : direct
-      ? (DIRECT_ORDER as readonly PlayerClientName[])
+      ? DIRECT_ORDER
       : clientOrder();
   return order.filter((client) => {
     const until = entries?.get(client);
