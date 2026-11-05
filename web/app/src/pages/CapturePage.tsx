@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { parseSigningSecret } from '@/auth/bookmarklet/sapisidHash';
-import { saveSession } from '@/auth/bookmarklet/storage';
+import { encodeSession, saveSession } from '@/auth/bookmarklet/storage';
 import type { CaptureMessage, CapturedSession } from '@/auth/bookmarklet/types';
 import { PageHeader } from '@/components/PageHeader';
 import { refreshYtAuth } from '@/extension/useYtAuth';
@@ -30,6 +30,7 @@ function isCaptureMessage(value: unknown): value is CaptureMessage {
 export default function CapturePage() {
   const [status, setStatus] = useState<'waiting' | 'saved' | 'error'>('waiting');
   const [detail, setDetail] = useState('Waiting for the bookmarklet…');
+  const [transfer, setTransfer] = useState<string | null>(null);
   const saved = useRef(false);
 
   useEffect(() => {
@@ -68,6 +69,10 @@ export default function CapturePage() {
         await refreshYtAuth();
         setStatus('saved');
         setDetail('Session captured. You can close this window and go back to BitChord.');
+        // iOS keeps a home-screen app and Safari in separate storage, so always
+        // offer the session as a string: in Safari it is how the Home Screen
+        // app gets it, and elsewhere it is harmless.
+        setTransfer(encodeSession(session));
       } catch (error) {
         setStatus('error');
         setDetail(`Couldn’t store the session: ${error instanceof Error ? error.message : String(error)}`);
@@ -94,9 +99,34 @@ export default function CapturePage() {
               </p>
             )}
             {status === 'saved' && (
-              <button className="mt-4 rounded-pill bg-key px-4 py-2 type-body-emphasized text-white" onClick={() => window.close()}>
-                Close
-              </button>
+              <>
+                <button className="mt-4 rounded-pill bg-key px-4 py-2 type-body-emphasized text-white" onClick={() => window.close()}>
+                  Close
+                </button>
+                {transfer && (
+                  <div className="mt-5 border-t border-quinary pt-4">
+                    <p className={settingsUi.rowDetail}>
+                      Using BitChord from the Home Screen? iOS keeps it and Safari apart, so this window’s session does
+                      not reach it. Copy the session and paste it there instead.
+                    </p>
+                    <button
+                      className="mt-3 rounded-pill bg-quinary px-4 py-2 type-body-emphasized"
+                      onClick={() => {
+                        void navigator.clipboard.writeText(transfer).then(
+                          () => setDetail('Session copied. Open BitChord from the Home Screen and paste it on the sign-in page.'),
+                          () => setDetail('Couldn’t copy. Open BitChord from the Home Screen and use “Paste session” there.'),
+                        );
+                      }}
+                    >
+                      Copy session for the Home Screen app
+                    </button>
+                    <details className="mt-3">
+                      <summary className={`cursor-pointer ${settingsUi.rowDetail}`}>Show the code</summary>
+                      <pre className="mt-2 overflow-x-auto rounded-[10px] bg-quaternary p-3 type-callout">{transfer}</pre>
+                    </details>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>

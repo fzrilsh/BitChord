@@ -73,6 +73,50 @@ export async function clearSession(): Promise<void> {
   await (await database()).delete(STORE, RECORD_KEY);
 }
 
+/**
+ * The session as one opaque string, for carrying it to a different browsing
+ * context.
+ *
+ * iOS keeps Safari and an installed home-screen app in separate storage, so a
+ * capture made in one is invisible to the other. The system clipboard is the
+ * one channel they share, and this is what travels over it.
+ *
+ * The string holds the cookie jar in the clear: it is only ever on the user's
+ * own clipboard, and the destination encrypts it on arrival. Treat it as the
+ * password it is.
+ */
+export function encodeSession(session: CapturedSession): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(session));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `bitchord-session:${btoa(binary)}`;
+}
+
+/** Reads a string from {@link encodeSession}; null for anything else. */
+export function decodeSession(text: string): CapturedSession | null {
+  const prefix = 'bitchord-session:';
+  const trimmed = text.trim();
+  if (!trimmed.startsWith(prefix)) return null;
+  try {
+    const binary = atob(trimmed.slice(prefix.length));
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as Partial<CapturedSession>;
+    if (typeof parsed.cookie !== 'string' || parsed.loggedIn !== true) return null;
+    return {
+      cookie: parsed.cookie,
+      pageId: parsed.pageId ?? null,
+      dataSyncId: parsed.dataSyncId ?? null,
+      authUser: parsed.authUser ?? null,
+      visitorData: parsed.visitorData ?? null,
+      clientVersion: parsed.clientVersion ?? null,
+      loggedIn: true,
+      capturedAt: typeof parsed.capturedAt === 'number' ? parsed.capturedAt : Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Whether the captured session is older than [days]; Google rotates session cookies. */
 export function isStale(session: CapturedSession, days = 30): boolean {
   return Date.now() - session.capturedAt > days * 24 * 60 * 60_000;
