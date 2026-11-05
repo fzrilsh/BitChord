@@ -1,0 +1,17 @@
+{
+  "name": "@bitchord/worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261103.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.4",
+    "wrangler": "^4.157.0"
+  }
+}

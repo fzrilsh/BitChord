@@ -1,0 +1,9 @@
+name = "bitchord-worker"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+
+# Deployed with `pnpm --filter @bitchord/worker deploy`. The web app reads the
+# address from VITE_WORKER_URL; nothing here is a secret.
+
+[observability]
+enabled = true
