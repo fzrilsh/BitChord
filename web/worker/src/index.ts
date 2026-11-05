@@ -122,10 +122,14 @@ async function handleResolve(request: Request, env: Env, url: URL): Promise<Resp
   if (!target || !/^https:\/\/[a-z0-9-]+\.googlevideo\.com\//.test(target)) {
     return json(request, env, { error: 'u must be a googlevideo URL' }, 400);
   }
-  // A range of one byte: enough to see the redirect, not enough to move audio.
+  // GET with a one-byte range, not HEAD: googlevideo answers HEAD with 403, so
+  // a HEAD never sees the redirect it is looking for. One byte is all this
+  // reads; the body is never returned to the caller.
   let current = target;
   for (let hop = 0; hop < 3; hop++) {
-    const response = await fetch(current, { method: 'HEAD', redirect: 'manual' });
+    const response = await fetch(current, { method: 'GET', headers: { Range: 'bytes=0-0' }, redirect: 'manual' });
+    // Drain the body so the connection is released; it is at most one byte.
+    await response.arrayBuffer().catch(() => undefined);
     if (response.status < 300 || response.status >= 400) {
       return json(request, env, { url: current, status: response.status });
     }
