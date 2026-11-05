@@ -44,6 +44,30 @@ interface Snapshot {
   isStandalone: boolean;
   playerStatus: string;
   playerError: string | null;
+  /** What this network looks like: the two address families, when each answers. */
+  egress: string;
+}
+
+/**
+ * Which addresses this network has.
+ *
+ * googlevideo signs a media URL for the address it sees. When a phone is handed
+ * an IPv6 address but its traffic leaves over IPv4, the URL is signed for one
+ * and used from the other, and googlevideo answers 302 — which a media element
+ * on iOS will not follow. Knowing whether both families are up is what tells
+ * that apart from anything else.
+ */
+async function readEgress(): Promise<string> {
+  const probe = async (url: string) => {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(6000) });
+      return ((await response.json()) as { ip?: string }).ip ?? 'unknown';
+    } catch {
+      return 'unreachable';
+    }
+  };
+  const [v4, v6] = await Promise.all([probe('https://api.ipify.org?format=json'), probe('https://api64.ipify.org?format=json')]);
+  return `ipify v4: ${v4} · api64 (v4 or v6): ${v6}`;
 }
 
 function mediaElement(): HTMLAudioElement | null {
@@ -155,6 +179,7 @@ export default function DiagnosePage() {
         isStandalone: window.matchMedia('(display-mode: standalone)').matches,
         playerStatus: status,
         playerError: error,
+        egress: '',
       });
     };
     tick();
@@ -162,10 +187,16 @@ export default function DiagnosePage() {
     return () => clearInterval(timer);
   }, [status, error]);
 
+  // Read once: the network does not change while the page is open.
+  useEffect(() => {
+    void readEgress().then((egress) => setSnapshot((current) => (current ? { ...current, egress } : current)));
+  }, []);
+
   const report = [
     `UA: ${navigator.userAgent}`,
     `display-mode standalone: ${snapshot?.isStandalone}`,
     `worker: ${snapshot?.workerUrl}`,
+    `network: ${snapshot?.egress || '(reading…)'}`,
     '',
     `src: ${snapshot?.src}`,
     `duration: ${snapshot?.duration}`,
@@ -225,6 +256,7 @@ export default function DiagnosePage() {
             ['player error', snapshot?.playerError ?? '(none)'],
             ['worker', String(snapshot?.workerUrl)],
             ['standalone', String(snapshot?.isStandalone)],
+            ['network', String(snapshot?.egress || '(reading…)')],
           ].map(([label, value]) => (
             <div key={label} className="contents">
               <dt className="text-secondary">{label}</dt>
