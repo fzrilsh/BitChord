@@ -159,6 +159,17 @@ function clientOrder(): readonly PlayerClientName[] {
 const SIGNED_ORDER: readonly PlayerClientName[] = ['YTMUSIC', 'WEB', 'VISIONOS'];
 
 /**
+ * Signed in, on the direct path: the phone clients first, then the web ones.
+ *
+ * The web clients answer a signed request with SABR or with a URL that has to
+ * be deciphered by the player script — and iOS refuses that script. So on a
+ * media-element path the phone clients must come first, or a signed-in phone
+ * never reaches a URL it can play. Measured 2026-07: signed, IOS and ANDROID
+ * both answer OK with a plain, undeciphered `url`.
+ */
+const SIGNED_DIRECT_ORDER = ['VISIONOS', 'IOS', 'ANDROID', 'YTMUSIC', 'WEB'] as const satisfies readonly AnyClientName[];
+
+/**
  * The clients to try, in order.
  *
  * `direct` is the path that hands the URL to a media element instead of Shaka
@@ -169,7 +180,9 @@ export function clientsFor(videoId: string, signed = false, direct = false): Pla
   const entries = excluded.get(keyOf(videoId, signed));
   const now = Date.now();
   const order: readonly PlayerClientName[] = signed
-    ? SIGNED_ORDER
+    ? direct
+      ? (SIGNED_DIRECT_ORDER as readonly PlayerClientName[])
+      : SIGNED_ORDER
     : direct
       ? (DIRECT_ORDER as readonly PlayerClientName[])
       : clientOrder();

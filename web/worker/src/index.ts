@@ -62,6 +62,16 @@ const SIGNED_ENDPOINTS = new Set([
 const GENERATE_IT_PATH = '/yt/jnn/GenerateIT';
 const GENERATE_IT_UPSTREAM = `${WWW_ORIGIN}/api/jnn/v1/GenerateIT`;
 
+/**
+ * How much of a stream an open-ended request is answered with.
+ *
+ * A media element asks for `bytes=0-` first, and googlevideo answers that with
+ * 403; it will serve an explicit range of any size. 1 MB is enough for the
+ * element to read the container header and start playing, after which it asks
+ * for the offsets it actually wants.
+ */
+const FIRST_WINDOW = 1_048_576;
+
 function signedEndpoint(pathname: string): string | null {
   if (!pathname.startsWith('/yt/')) return null;
   const endpoint = pathname.slice(4);
@@ -222,10 +232,28 @@ async function handleAudio(request: Request, env: Env, url: URL): Promise<Respon
     return json(request, env, { error: 'no direct audio for this video' }, 502);
   }
 
-  const range = request.headers.get('Range');
+  // The stream token the page minted, when it has one. googlevideo serves only
+  // the first ~1.1 MB of a stream without it and answers 403 past that, so
+  // carrying it through is what lets a whole track play.
+  const pot = url.searchParams.get('pot');
+  const mediaUrl = new URL(chosen.url);
+  if (pot) mediaUrl.searchParams.set('pot', pot);
+
+  // A media element opens with `Range: bytes=0-`, and googlevideo answers an
+  // open-ended range with 403 (it reads as "the whole file", which it will not
+  // serve in one response). Turning it into a bounded window gets a 206; the
+  // element then asks for explicit offsets, which googlevideo does serve.
+  const asked = request.headers.get('Range');
+  const open = /^bytes=(\d+)-$/.exec(asked ?? '');
+  const start = open ? Number(open[1]) : 0;
   const mediaHeaders = new Headers();
-  if (range) mediaHeaders.set('Range', range);
-  const media = await fetch(chosen.url, { headers: mediaHeaders });
+  mediaHeaders.set('Range', asked && !open ? asked : `bytes=${start}-${start + FIRST_WINDOW - 1}`);
+  const media = await fetch(mediaUrl, { headers: mediaHeaders });
+  if (media.status !== 206 && media.status !== 200) {
+    console.log(`audio ${videoId}: media answered ${media.status}`);
+    await media.body?.cancel().catch(() => undefined);
+    return json(request, env, { error: `media answered ${media.status}` }, media.status === 403 ? 403 : 502);
+  }
   const out = new Headers(media.headers);
   for (const [key, value] of Object.entries(corsHeaders(request, env))) out.set(key, value);
   out.delete('content-security-policy');

@@ -303,6 +303,10 @@ export class YouTubeEngine {
    * AAC (itag 140) is chosen: Safari's media element decodes MP4, not WebM
    * Opus. The track must come from a client that returns direct URLs at all —
    * VISIONOS does, and it is the only one measured to serve the full track.
+   *
+   * The device's URL is tried first, because it is the only one signed for this
+   * phone's address. The Worker's proxy is a fallback for when the element
+   * refuses it, not a gate in front of it.
    */
   private async startDirectStream(
     resolved: ResolvedPlayer,
@@ -350,43 +354,36 @@ export class YouTubeEngine {
     } else {
       url = new URL(raw);
     }
-    if (usesWebPo(client)) {
-      const pot = await botguard.mint(videoId);
-      if (pot) url.searchParams.set('pot', pot);
-    }
+    // A stream token for the media URL. googlevideo serves only the first
+    // ~1 MiB of an unattested stream and answers 403 past it, which reads as a
+    // track that stops after ~70s. Minting is cheap once BotGuard is up; a
+    // failure just means the element gets the URL without one.
+    const pot = await botguard.mint(videoId).catch(() => undefined);
+    if (pot) url.searchParams.set('pot', pot);
 
     this.checkCurrent(generation);
-    // googlevideo answers a 302 when the connection reaches it from a different
-    // address family than the URL was signed for — a phone whose network is
-    // IPv6 but whose request falls back to IPv4. Safari does not follow that
-    // redirect for a media element (SRC_NOT_SUPPORTED), so ask the Worker
-    // where it ends and hand the element that address instead.
-    const finalUrl = await followRedirects(url, videoId);
 
-    // crossOrigin is deliberately absent: with it set, the element must satisfy
-    // CORS, which googlevideo does not offer. player.ts omits it on iOS.
-    this.audio.removeAttribute('crossorigin');
-    // Clear a previous element's error: iOS keeps an element that failed
-    // unusable, so a stale error would refuse this source too.
-    this.audio.removeAttribute('src');
-    this.audio.load();
-    trackLog.d(`${client} src set (${finalUrl.hostname}, itag ${chosen.itag})`, videoId);
-    this.audio.src = finalUrl.toString();
-
-    if (autoplay) {
-      try {
-        await this.audio.play();
-      } catch (error) {
-        if (error instanceof DOMException && error.name === 'NotAllowedError') {
-          trackLog.w('autoplay was blocked by the browser; waiting for a tap', videoId);
-        } else {
-          trackLog.w(`${client} play() failed: ${String(error)} (media error ${this.audio.error?.code ?? 'none'})`, videoId);
-          throw error;
-        }
+    // The element gets the device's own URL first. It is signed for this
+    // phone's address, so it is the only address that can stream the whole
+    // track; nothing is asked of the Worker beforehand.
+    //
+    // Only if the element refuses it does the Worker's /audio fallback come
+    // into play. Asking the Worker to "check" a googlevideo URL was the earlier
+    // bug: it fetches from Cloudflare's address, so a URL signed for the phone
+    // always answers 403 there, and the valid URL was thrown away every time.
+    const direct = await this.trySource(url, chosen.itag, autoplay, generation);
+    if (!direct.ok) {
+      trackLog.w(`${client} direct URL refused (${direct.why}); streaming through the Worker`, videoId);
+      const worker = config.workerUrl?.replace(/\/+$/, '');
+      if (worker) {
+        const fallback = new URL(`${worker}/audio?v=${encodeURIComponent(videoId)}${await sessionQuery()}`);
+        if (pot) fallback.searchParams.set('pot', pot);
+        const proxied = await this.trySource(fallback, chosen.itag, autoplay, generation);
+        if (!proxied.ok) throw new Error(`streaming failed: ${direct.why}; Worker fallback: ${proxied.why}`);
+      } else {
+        throw new Error(`streaming failed: ${direct.why}`);
       }
     }
-    trackLog.d(`${client} waiting for first audio`, videoId);
-    await this.firstAudio(generation);
     if (startSec > 0) this.audio.currentTime = startSec;
     this.checkCurrent(generation);
 
@@ -566,6 +563,48 @@ export class YouTubeEngine {
       : { label: 'unknown', stats: { codec: null, itag: null, bitrateKbps: null, sampleRateHz: null, channels: null } };
   }
 
+/**
+ * Hands [url] to the media element and resolves once it can play, or with the
+ * reason it refused.
+ *
+ * iOS keeps an element that failed unusable, so the previous source and its
+ * error are cleared before every attempt — otherwise a stale error refuses a
+ * perfectly good URL.
+ */
+  private async trySource(
+    url: URL,
+    itag: number | undefined,
+    autoplay: boolean,
+    generation: number,
+  ): Promise<{ ok: true } | { ok: false; why: string }> {
+    // crossOrigin is deliberately absent: with it set, the element must satisfy
+    // CORS, which googlevideo does not offer. player.ts omits it on iOS.
+    this.audio.removeAttribute('crossorigin');
+    this.audio.removeAttribute('src');
+    this.audio.load();
+    trackLog.d(`src set (${url.hostname}, itag ${itag ?? '?'})`);
+    this.audio.src = url.toString();
+
+    if (autoplay) {
+      try {
+        await this.audio.play();
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'NotAllowedError') {
+          trackLog.w('autoplay was blocked by the browser; waiting for a tap');
+        } else {
+          return { ok: false, why: `${String(error)} (media error ${this.audio.error?.code ?? 'none'})` };
+        }
+      }
+    }
+    try {
+      await this.firstAudio(generation);
+      return { ok: true };
+    } catch (error) {
+      if (error instanceof SupersededError) throw error;
+      return { ok: false, why: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   /** Resolves once the element has data to play, or rejects after the timeout. */
   private firstAudio(generation: number): Promise<void> {
     const audio = this.audio;
@@ -658,18 +697,6 @@ function hasDirectAudio(info: YT.VideoInfo): boolean {
 }
 
 /**
- * The address a googlevideo URL finally lands on, asking the Worker to follow
- * the redirects.
- *
- * A media element will not follow a cross-host redirect on iOS, and googlevideo
- * answers one whenever the URL was signed for a different address family than
- * the one the request arrives on. Resolving it here costs one small request and
- * makes the element's source a plain 206.
- *
- * Without a Worker (the extension build), the URL is used as it is: the
- * extension's rules already make googlevideo answer directly there.
- */
-/**
  * The captured session, as query parameters for the Worker's audio fallback.
  *
  * A media element cannot send custom headers, so the cookie and the signature
@@ -693,38 +720,6 @@ async function sessionQuery(): Promise<string> {
     return `&${params.toString()}`;
   } catch {
     return '';
-  }
-}
-
-async function followRedirects(url: URL, videoId: string): Promise<URL> {
-  if (!config.workerUrl) return url;
-  const worker = config.workerUrl.replace(/\/+$/, '');
-  try {
-    const response = await fetch(`${worker}/resolve?u=${encodeURIComponent(url.toString())}`);
-    if (!response.ok) return url;
-    const body = (await response.json()) as { url?: string; status?: number };
-    if (!body.url) return url;
-
-    // 2xx: the URL was reachable as it stood (no redirect, or one followed to
-    // a host that answers) — hand the element the address that worked.
-    if (body.status !== undefined && body.status >= 200 && body.status < 300) {
-      if (body.url === url.toString()) return url;
-      trackLog.d(`resolved a googlevideo redirect (${body.status})`, videoId);
-      return new URL(body.url);
-    }
-
-    // Anything else means no address this device can use: googlevideo answers
-    // 302 when the request arrives from a different address family than the URL
-    // was signed for, and 403 when even the redirect target refuses. Neither
-    // can be followed by a media element, and every client's URL is IP-bound,
-    // so stream the bytes through the Worker instead — it mints its own URL,
-    // signed for itself.
-    trackLog.w(`googlevideo unreachable directly (${body.status ?? '?'}); streaming through the Worker`, videoId);
-    return new URL(`${worker}/audio?v=${encodeURIComponent(videoId)}${await sessionQuery()}`);
-  } catch {
-    // A failed resolve is not fatal: the element gets the original URL, which
-    // works whenever there was no redirect to follow.
-    return url;
   }
 }
 

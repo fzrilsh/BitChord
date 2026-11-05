@@ -81,6 +81,94 @@ describe('Worker', () => {
     expect(new Headers(seen[0]!.headers).get('origin')).toBe('https://www.youtube.com');
   });
 
+  describe('/audio', () => {
+    /** The player response the Worker mints for itself, then the media fetch it makes. */
+    function stubPlayer(mediaStatus = 206): { media: RequestInit[] } {
+      const media: RequestInit[] = [];
+      vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/youtubei/v1/player')) {
+          return new Response(
+            JSON.stringify({
+              playabilityStatus: { status: 'OK' },
+              streamingData: {
+                adaptiveFormats: [
+                  {
+                    itag: 140,
+                    mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+                    url: 'https://rr2---sn-test.googlevideo.com/videoplayback?itag=140',
+                  },
+                ],
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        media.push(init ?? {});
+        return new Response(new Uint8Array([0]), {
+          status: mediaStatus,
+          headers: { 'content-type': 'audio/mp4', 'content-range': 'bytes 0-0/1000' },
+        });
+      });
+      return { media };
+    }
+
+    it('turns an open-ended range into a bounded one', async () => {
+      const { media } = stubPlayer();
+      // A media element opens with `bytes=0-`, and googlevideo answers that with
+      // 403; the Worker must ask for a bounded window instead.
+      const response = await call('/audio?v=nyNm-dVBMoo', { headers: { Range: 'bytes=0-' } });
+      expect(response.status).toBe(206);
+      const range = new Headers(media[0]!.headers).get('range');
+      expect(range).toBe('bytes=0-1048575');
+    });
+
+    it('sends no range at all as a bounded first window', async () => {
+      const { media } = stubPlayer();
+      await call('/audio?v=nyNm-dVBMoo');
+      expect(new Headers(media[0]!.headers).get('range')).toBe('bytes=0-1048575');
+    });
+
+    it('forwards an explicit range untouched', async () => {
+      const { media } = stubPlayer();
+      await call('/audio?v=nyNm-dVBMoo', { headers: { Range: 'bytes=1048576-2097151' } });
+      expect(new Headers(media[0]!.headers).get('range')).toBe('bytes=1048576-2097151');
+    });
+
+    it('carries the stream token through to the media URL', async () => {
+      const { media } = stubPlayer();
+      await call('/audio?v=nyNm-dVBMoo&pot=TOKEN', { headers: { Range: 'bytes=0-1' } });
+      expect(media).toHaveLength(1);
+      // The media fetch is the only one whose URL is not the player endpoint.
+      const seen: string[] = [];
+      vi.unstubAllGlobals();
+      vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+        seen.push(String(input));
+        if (String(input).includes('/youtubei/v1/player')) {
+          return new Response(
+            JSON.stringify({
+              playabilityStatus: { status: 'OK' },
+              streamingData: {
+                adaptiveFormats: [{ itag: 140, mimeType: 'audio/mp4', url: 'https://rr2---sn-test.googlevideo.com/videoplayback?itag=140' }],
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(new Uint8Array([0]), { status: 206 });
+      });
+      await call('/audio?v=nyNm-dVBMoo&pot=TOKEN', { headers: { Range: 'bytes=0-1' } });
+      expect(seen.at(-1)).toContain('pot=TOKEN');
+    });
+
+    it('reports a refused media fetch rather than passing its body through', async () => {
+      stubPlayer(403);
+      const response = await call('/audio?v=nyNm-dVBMoo', { headers: { Range: 'bytes=0-' } });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: 'media answered 403' });
+    });
+  });
+
   it('restricts CORS to ALLOWED_ORIGINS when set', async () => {
     const restricted = { ALLOWED_ORIGINS: 'https://fzrilsh.github.io' } as never;
     const response = await worker.fetch(
