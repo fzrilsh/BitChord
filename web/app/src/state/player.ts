@@ -146,6 +146,10 @@ interface Deck {
   gain: number;
 }
 
+/** A silent WAV, to start the element inside a gesture without a real source. */
+const SILENCE =
+  'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
+
 let decks: Deck[] | null = null;
 let decksPromise: Promise<Deck[]> | null = null;
 /** The two media elements, made on the first tap (see createElements). */
@@ -197,8 +201,13 @@ function unlockAudio(): void {
   createElements();
   const audio = getAudio();
   if (!audio || !audio.paused) return;
+  // `play()` on an element with no source is not a harmless no-op on iOS: it
+  // fails with SRC_NOT_SUPPORTED and leaves the element unusable, so the real
+  // stream is refused afterwards. A fraction of a second of silence gives the
+  // gesture something valid to start.
+  if (!audio.getAttribute('src')) audio.src = SILENCE;
   audio.play().catch(() => {
-    // No source yet, or the browser refused: the load path reports the reason.
+    // A browser that refused anyway: the load path reports the reason.
   });
 }
 

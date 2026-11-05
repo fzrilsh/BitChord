@@ -17,19 +17,35 @@ export const CLIENT_ORDER = ['VISIONOS', 'YTMUSIC', 'WEB', 'MWEB'] as const;
 export type PlayerClientName = (typeof CLIENT_ORDER)[number];
 
 /**
+ * The order for the direct-URL path: iOS, and every browser without the
+ * extension. It adds the phone clients, whose URLs answer 206 straight from
+ * the host the player response named.
+ *
+ * MWEB is left out on purpose. Its URLs come back as a 302 to another host,
+ * and iOS refuses that with SRC_NOT_SUPPORTED instead of following it — the
+ * audio element reports "the operation is not supported" and the track is
+ * dropped. VISIONOS, IOS, ANDROID and YTMUSIC all answer directly.
+ */
+export const DIRECT_ORDER = ['VISIONOS', 'IOS', 'ANDROID', 'YTMUSIC', 'WEB'] as const;
+export type DirectClientName = (typeof DIRECT_ORDER)[number];
+
+/** Every client either order can name: the SABR set plus the phone clients. */
+export type AnyClientName = PlayerClientName | DirectClientName;
+
+/**
  * The BotGuard (WebPO) clients. As on Android (PoTokenGenerator /
  * InnerTubeX's WEB_BOTGUARD provider), they get two tokens: one bound to the
  * session's visitor data for the player request, and one bound to the
  * videoId for the stream. VISIONOS is not one of them.
  */
-const WEBPO_CLIENTS: ReadonlySet<PlayerClientName> = new Set(['YTMUSIC', 'WEB', 'MWEB']);
+const WEBPO_CLIENTS: ReadonlySet<string> = new Set(['YTMUSIC', 'WEB', 'MWEB']);
 
-export function usesWebPo(client: PlayerClientName): boolean {
+export function usesWebPo(client: string): boolean {
   return WEBPO_CLIENTS.has(client);
 }
 
 /** The player-request token for [client], or undefined for a client that doesn't take one. */
-async function playerRequestToken(yt: Innertube, client: PlayerClientName): Promise<string | undefined> {
+async function playerRequestToken(yt: Innertube, client: string): Promise<string | undefined> {
   if (!WEBPO_CLIENTS.has(client)) return undefined;
   const visitorData = yt.session.context.client.visitorData;
   if (!visitorData) return undefined;
@@ -136,10 +152,22 @@ function clientOrder(): readonly PlayerClientName[] {
  */
 const SIGNED_ORDER: readonly PlayerClientName[] = ['YTMUSIC', 'WEB', 'VISIONOS'];
 
-export function clientsFor(videoId: string, signed = false): PlayerClientName[] {
+/**
+ * The clients to try, in order.
+ *
+ * `direct` is the path that hands the URL to a media element instead of Shaka
+ * (iOS, and any browser without the extension): it adds the phone clients and
+ * drops MWEB, whose redirect iOS will not follow.
+ */
+export function clientsFor(videoId: string, signed = false, direct = false): PlayerClientName[] {
   const entries = excluded.get(keyOf(videoId, signed));
   const now = Date.now();
-  return (signed ? SIGNED_ORDER : clientOrder()).filter((client) => {
+  const order: readonly PlayerClientName[] = signed
+    ? SIGNED_ORDER
+    : direct
+      ? (DIRECT_ORDER as readonly PlayerClientName[])
+      : clientOrder();
+  return order.filter((client) => {
     const until = entries?.get(client);
     return until === undefined || until <= now;
   });
@@ -231,12 +259,13 @@ export async function resolvePlayer(
   videoId: string,
   skip: ReadonlySet<PlayerClientName> = new Set(),
   signed = false,
+  direct = false,
 ): Promise<ResolvedPlayer> {
   const known = knownVerdict(videoId, signed);
   if (known) throw new UnplayableError(known.reason, known.ageGated);
 
   const { Utils, YT } = await import('youtubei.js/web');
-  const candidates = clientsFor(videoId, signed).filter((c) => !skip.has(c)).slice(0, CLIENT_ATTEMPTS);
+  const candidates = clientsFor(videoId, signed, direct).filter((c) => !skip.has(c)).slice(0, CLIENT_ATTEMPTS);
   let lastReason = 'No YouTube client would play this track';
   let permanent: string | null = null;
   let ageGated = false;

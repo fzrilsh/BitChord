@@ -189,7 +189,7 @@ export class YouTubeEngine {
       for (let attempt = 0; attempt < CLIENT_ATTEMPTS; attempt++) {
         let resolved: ResolvedPlayer;
         try {
-          resolved = await timed('player request', videoId, () => resolvePlayer(yt, videoId, skip, signed));
+          resolved = await timed('player request', videoId, () => resolvePlayer(yt, videoId, skip, signed, this.directOnly));
         } catch (error) {
           // An age gate or a bot check is a verdict on the visitor, not the
           // track: ask again as the signed-in user (prompt §5.3). With no
@@ -332,6 +332,10 @@ export class YouTubeEngine {
     // crossOrigin is deliberately absent: with it set, the element must satisfy
     // CORS, which googlevideo does not offer. player.ts omits it on iOS.
     this.audio.removeAttribute('crossorigin');
+    // Clear a previous element's error: iOS keeps an element that failed
+    // unusable, so a stale error would refuse this source too.
+    this.audio.removeAttribute('src');
+    this.audio.load();
     this.audio.src = url.toString();
 
     if (autoplay) {
