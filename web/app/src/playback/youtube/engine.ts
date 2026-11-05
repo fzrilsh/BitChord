@@ -4,6 +4,7 @@ import shaka from 'shaka-player/dist/shaka-player.compiled';
 import { Constants, Utils, YT, type Innertube } from 'youtubei.js/web';
 import { timed, trackLog } from '../trackLog';
 import { botguard } from './botguard';
+import { getBridge } from '@/extension/bridge';
 import { ytAuthSnapshot } from '@/extension/useYtAuth';
 import { isIOS } from '@/lib/platform';
 import { getInnertube, getSignedInnertube } from './innertube';
@@ -95,12 +96,18 @@ export class YouTubeEngine {
   private direct: ResolvedPlayer | null = null;
   private preferredCodecs: string[];
   /**
-   * iOS plays the direct URL in the element itself. googlevideo sends no
-   * `Access-Control-Allow-Origin`, so Shaka's fetch-based loader is refused,
-   * while a media element (which sends no Origin) is served. Measured
-   * 2026-11-05: `<audio src>` played and seeked the whole track.
+   * Play one direct URL in the element itself, without Shaka.
+   *
+   * Always, when there is no extension: googlevideo answers a page's
+   * `fetch()` (Shaka's loader) without `Access-Control-Allow-Origin`, so every
+   * Shaka load fails with error 1002 — measured on desktop and iOS alike. The
+   * media element sends no Origin and is served.
+   *
+   * With the extension, its DNR rules add the ACAO header and Shaka works as
+   * before; iOS still uses the element, since its MSE support is the problem
+   * there.
    */
-  private readonly directOnly = isIOS();
+  private readonly directOnly = isIOS() || !getBridge();
 
   /** Raised when a track can't be played at all, after every fallback. */
   onFatal: (videoId: string, message: string, permanent: boolean) => void = () => {};

@@ -1,9 +1,10 @@
 import type { DetectedExtension } from '@bitchord/shared/bridge';
 import { create } from 'zustand';
 import type { Track } from '@/data/music/types';
+import { getBridge } from '@/extension/bridge';
 import { extensionQueryKey } from '@/extension/useExtension';
 import { artworkAtPixels } from '@/lib/artwork';
-import { isIOS, isPureWeb } from '@/lib/platform';
+import { isPureWeb } from '@/lib/platform';
 import { queryClient } from '@/lib/queryClient';
 import { extendStation } from '@/playback/queue/builder';
 import {
@@ -186,10 +187,10 @@ function getDecks(): Promise<Deck[]> {
       // Media from another origin is silent inside an AudioContext unless it
       // is fetched with CORS (prompt §6, the Web Audio caveat).
       //
-      // Not on iOS: googlevideo sends no ACAO, and a media element with
-      // crossOrigin set must satisfy CORS, so the stream is refused outright.
-      // The iOS path plays the direct URL without the Web Audio graph.
-      if (!isIOS()) audio.crossOrigin = 'anonymous';
+      // Only with the extension: its rules add the ACAO header googlevideo
+      // omits. Without it, a crossOrigin element must satisfy CORS and the
+      // stream is refused, so the direct path leaves the attribute off.
+      if (getBridge()) audio.crossOrigin = 'anonymous';
       const engine = new YouTubeEngine(audio);
       const deck: Deck = { engine, audio, gain: 1 };
       engine.onFatal = (videoId, message) => {
