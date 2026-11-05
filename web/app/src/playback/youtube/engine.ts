@@ -323,10 +323,7 @@ export class YouTubeEngine {
     const audio = info.streaming_data?.adaptive_formats.filter(
       (format) => format.has_audio && !format.has_video && !format.is_drc && (format.url || format.signature_cipher || format.cipher),
     );
-    const chosen =
-      audio?.find((format) => format.itag === 140) ??
-      audio?.filter((format) => format.mime_type?.startsWith('audio/mp4')).sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))[0] ??
-      audio?.[0];
+    const chosen = pickDirectAudio(audio ?? [], this.audio.canPlayType.bind(this.audio));
     if (!chosen) throw new Error('No direct audio URL in this player response');
 
     // Decipher only when there is something to decipher.
@@ -694,6 +691,44 @@ function codecName(codec: string | null): string | null {
 /** Whether the response carries audio URLs to fetch directly (VISIONOS does; the web clients only offer SABR). */
 function hasDirectAudio(info: YT.VideoInfo): boolean {
   return !!info.streaming_data?.adaptive_formats.some((f) => f.has_audio && !f.has_video && (f.url || f.signature_cipher || f.cipher));
+}
+
+/** The audio formats worth handing to a media element, best first. */
+type DirectFormat = NonNullable<YT.VideoInfo['streaming_data']>['adaptive_formats'][number];
+
+/**
+ * Which direct audio rendition to hand the media element.
+ *
+ * Opus is preferred, and that is not a codec-snob choice. YouTube's AAC
+ * fragments (itag 140) carry a `sidx` whose timescale is 1 while its
+ * subsegment durations are in the track's 44,100 ticks. WebKit believes the
+ * `sidx` over the `mvhd`, so a 3:31 track reports as 7:02 — measured
+ * 2026-11-05: `mvhd` 211.023 s, `sidx` subsegments summing to 9,306,112 ticks,
+ * and the element reading 421.998 s. The same track's Opus rendition reports
+ * 210.981 s, because its `sidx` is scaled correctly.
+ *
+ * A wrong duration is not cosmetic: the UI shows a track twice its length, the
+ * progress bar is wrong, and "next" never fires at the real end.
+ *
+ * AAC remains the fallback for anything that cannot decode Opus, and 140 is
+ * still preferred within it (stereo, 128 kbps).
+ */
+export function pickDirectAudio(
+  formats: readonly DirectFormat[],
+  canPlay: (type: string) => string,
+): DirectFormat | undefined {
+  const opus = formats
+    .filter((format) => format.mime_type?.startsWith('audio/webm') && format.mime_type.includes('opus'))
+    .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))[0];
+  if (opus && canPlay('audio/webm; codecs="opus"')) return opus;
+
+  return (
+    formats.find((format) => format.itag === 140) ??
+    formats
+      .filter((format) => format.mime_type?.startsWith('audio/mp4'))
+      .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))[0] ??
+    formats[0]
+  );
 }
 
 /**
