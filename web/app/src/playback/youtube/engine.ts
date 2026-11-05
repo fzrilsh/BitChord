@@ -5,6 +5,7 @@ import { Constants, Utils, YT, type Innertube } from 'youtubei.js/web';
 import { timed, trackLog } from '../trackLog';
 import { botguard } from './botguard';
 import { ytAuthSnapshot } from '@/extension/useYtAuth';
+import { isIOS } from '@/lib/platform';
 import { getInnertube, getSignedInnertube } from './innertube';
 import {
   CLIENT_ATTEMPTS,
@@ -93,6 +94,13 @@ export class YouTubeEngine {
   /** The response the playing track streams from, when it has direct URLs; the video picture comes from it too. */
   private direct: ResolvedPlayer | null = null;
   private preferredCodecs: string[];
+  /**
+   * iOS plays the direct URL in the element itself. googlevideo sends no
+   * `Access-Control-Allow-Origin`, so Shaka's fetch-based loader is refused,
+   * while a media element (which sends no Origin) is served. Measured
+   * 2026-11-05: `<audio src>` played and seeked the whole track.
+   */
+  private readonly directOnly = isIOS();
 
   /** Raised when a track can't be played at all, after every fallback. */
   onFatal: (videoId: string, message: string, permanent: boolean) => void = () => {};
@@ -162,7 +170,8 @@ export class YouTubeEngine {
     const started = performance.now();
     trackLog.i(`loading at ${startSec.toFixed(1)}s`, videoId);
     try {
-      const player = await this.ensurePlayer();
+      // iOS never loads Shaka: its fetch-based loader cannot read googlevideo.
+      const player = this.directOnly ? null : await this.ensurePlayer();
       this.yt ??= await timed('InnerTube session', videoId, getInnertube);
       void botguard.init().catch((error: unknown) => trackLog.w(`BotGuard init failed: ${String(error)}`, videoId));
 
@@ -187,7 +196,9 @@ export class YouTubeEngine {
         }
         this.checkCurrent(generation);
         try {
-          const track = await this.startStream(player, resolved, startSec, autoplay, generation);
+          const track = player
+            ? await this.startStream(player, resolved, startSec, autoplay, generation)
+            : await this.startDirectStream(resolved, startSec, autoplay, generation);
           trackLog.i(
             `playing via ${track.client}, ${track.format}, first audio after ${Math.round(performance.now() - started)}ms`,
             videoId,
@@ -270,6 +281,88 @@ export class YouTubeEngine {
   }
 
   /**
+   * iOS: hand the element one direct URL and let AVPlayer stream it.
+   *
+   * googlevideo sends no `Access-Control-Allow-Origin`, so anything that goes
+   * through `fetch()` (Shaka, SABR, the DASH manifest path) is refused. A media
+   * element sends no Origin, and the URL is signed for this device's IP, so the
+   * element streams the whole track — seek included (measured on iOS 17.5).
+   *
+   * AAC (itag 140) is chosen: Safari's media element decodes MP4, not WebM
+   * Opus. The track must come from a client that returns direct URLs at all —
+   * VISIONOS does, and it is the only one measured to serve the full track.
+   */
+  private async startDirectStream(
+    resolved: ResolvedPlayer,
+    startSec: number,
+    autoplay: boolean,
+    generation: number,
+  ): Promise<LoadedTrack> {
+    const { videoId, client, info, signed } = resolved;
+    this.adapter?.dispose();
+    this.adapter = null;
+    this.current = { videoId, client, signed };
+    this.direct = resolved;
+
+    const audio = info.streaming_data?.adaptive_formats.filter(
+      (format) => format.has_audio && !format.has_video && !format.is_drc && (format.url || format.signature_cipher || format.cipher),
+    );
+    const chosen =
+      audio?.find((format) => format.itag === 140) ??
+      audio?.filter((format) => format.mime_type?.startsWith('audio/mp4')).sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))[0] ??
+      audio?.[0];
+    if (!chosen) throw new Error('No direct audio URL in this player response');
+
+    const url = new URL(await chosen.decipher(resolved.yt.session.player!));
+    if (usesWebPo(client)) {
+      const pot = await botguard.mint(videoId);
+      if (pot) url.searchParams.set('pot', pot);
+    }
+
+    this.checkCurrent(generation);
+    // crossOrigin is deliberately absent: with it set, the element must satisfy
+    // CORS, which googlevideo does not offer. player.ts omits it on iOS.
+    this.audio.removeAttribute('crossorigin');
+    this.audio.src = url.toString();
+
+    if (autoplay) {
+      await this.audio.play().catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'NotAllowedError') {
+          trackLog.w('autoplay was blocked by the browser; waiting for a tap', videoId);
+        } else throw error;
+      });
+    }
+    await this.firstAudio(generation);
+    if (startSec > 0) this.audio.currentTime = startSec;
+    this.checkCurrent(generation);
+
+    const basic = info.basic_info;
+    const itag = String(chosen.itag ?? '');
+    const codec = chosen.mime_type?.startsWith('audio/mp4') ? 'AAC' : 'Opus';
+    const bitrateKbps = Math.round((chosen.bitrate ?? 0) / 1000) || null;
+    return {
+      videoId,
+      title: basic.title ?? '',
+      author: basic.author ?? '',
+      durationSec: basic.duration ?? Math.round(this.audio.duration || 0),
+      thumbnails: [...(basic.thumbnail ?? [])]
+        .map((thumbnail) => ({ url: thumbnail.url, width: thumbnail.width, height: thumbnail.height }))
+        .sort((a, b) => b.width - a.width),
+      client,
+      format: `${itag} ${codec.toLowerCase()} ${bitrateKbps ?? '?'}kbps direct`,
+      stream: {
+        codec,
+        itag: itag || null,
+        bitrateKbps,
+        sampleRateHz: chosen.audio_sample_rate ?? null,
+        channels: chosen.audio_channels ?? null,
+        mode: 'direct',
+      },
+      loudnessDb: info.player_config?.audio_config?.loudness_db ?? null,
+    };
+  }
+
+  /**
    * A plain DASH manifest over the response's own audio URLs, which Shaka
    * fetches by byte range. This is how Android plays YouTube: InnerTubeX runs
    * with SABR off and plays the direct URLs a client like VISIONOS returns.
@@ -314,6 +407,9 @@ export class YouTubeEngine {
   async videoStream(height: number | null = null): Promise<VideoStream | null> {
     const resolved = this.direct;
     if (!resolved) return null;
+    // The picture is a Shaka stream, and Shaka cannot read googlevideo on iOS
+    // (no ACAO). The audio still plays; the artwork stands in for the video.
+    if (this.directOnly) return null;
     const { videoId, client, info } = resolved;
     const pictures = (info.streaming_data?.adaptive_formats ?? []).filter(
       (f) => f.has_video && !f.has_audio && f.width && f.height && (f.url || f.signature_cipher || f.cipher),
@@ -468,6 +564,12 @@ export class YouTubeEngine {
     this.generation++;
     this.current = null;
     this.direct = null;
+    if (this.directOnly) {
+      // Nothing but the element is playing on iOS; let go of the stream too.
+      this.audio.pause();
+      this.audio.removeAttribute('src');
+      this.audio.load();
+    }
     await this.player?.unload();
     this.adapter?.dispose();
     this.adapter = null;

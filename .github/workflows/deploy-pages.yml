@@ -1,0 +1,83 @@
+name: Deploy web app to GitHub Pages
+
+# The pure-web build: the app itself is static, so GitHub Pages can serve it.
+# It reaches YouTube through the Cloudflare Worker (web/worker), whose address
+# comes from the VITE_WORKER_URL repository variable.
+#
+# One-time setup in the fork's Settings → Pages: Source = "GitHub Actions".
+on:
+  push:
+    branches: [main, feat/pure-web-ios]
+    paths:
+      - 'web/**'
+      - '.github/workflows/deploy-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build the web app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and test
+        run: pnpm typecheck && pnpm test
+
+      - name: Build
+        env:
+          # Pages serves a project site under /<repo>/. This is the repository's
+          # own name from the push event, not user-supplied text.
+          VITE_BASE_URL: /${{ github.event.repository.name }}/
+          # No party server here: Listen Together stays off in this build.
+          VITE_REQUIRE_PARTY_SERVER: 'false'
+          VITE_WORKER_URL: ${{ vars.VITE_WORKER_URL }}
+          # The extension downloads are served from the main site, not from this one.
+          VITE_EXTENSION_CHROME_URL: ${{ vars.VITE_EXTENSION_CHROME_URL }}
+          VITE_EXTENSION_FIREFOX_URL: ${{ vars.VITE_EXTENSION_FIREFOX_URL }}
+          VITE_EXTENSION_MANIFEST_URL: ${{ vars.VITE_EXTENSION_MANIFEST_URL }}
+        run: pnpm --filter @bitchord/app build
+
+      - name: Disable Jekyll
+        # GitHub Pages otherwise drops files and folders beginning with "_".
+        run: touch dist/.nojekyll
+        working-directory: web/app
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/app/dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

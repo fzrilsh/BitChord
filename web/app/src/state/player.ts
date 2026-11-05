@@ -3,6 +3,7 @@ import { create } from 'zustand';
 import type { Track } from '@/data/music/types';
 import { extensionQueryKey } from '@/extension/useExtension';
 import { artworkAtPixels } from '@/lib/artwork';
+import { isIOS, isPureWeb } from '@/lib/platform';
 import { queryClient } from '@/lib/queryClient';
 import { extendStation } from '@/playback/queue/builder';
 import {
@@ -184,7 +185,11 @@ function getDecks(): Promise<Deck[]> {
       audio.preload = 'auto';
       // Media from another origin is silent inside an AudioContext unless it
       // is fetched with CORS (prompt §6, the Web Audio caveat).
-      audio.crossOrigin = 'anonymous';
+      //
+      // Not on iOS: googlevideo sends no ACAO, and a media element with
+      // crossOrigin set must satisfy CORS, so the stream is refused outright.
+      // The iOS path plays the direct URL without the Web Audio graph.
+      if (!isIOS()) audio.crossOrigin = 'anonymous';
       const engine = new YouTubeEngine(audio);
       const deck: Deck = { engine, audio, gain: 1 };
       engine.onFatal = (videoId, message) => {
@@ -367,9 +372,15 @@ function syncAutomix() {
   });
 }
 
-function extensionReady(): boolean {
+/**
+ * Whether playback can start at all: through the extension, or — with no
+ * extension, as on iOS Safari — through the pure-web Worker (the sandbox mints
+ * the stream, the element plays it directly).
+ */
+function playbackReady(): boolean {
   const detected = queryClient.getQueryData<DetectedExtension | null>(extensionQueryKey);
-  return !!detected?.info.capabilities.includes('yt');
+  if (detected?.info.capabilities.includes('yt')) return true;
+  return isPureWeb();
 }
 
 const artistNames = (track: Track) => track.artists.map((a) => a.name).join(', ');
@@ -674,7 +685,7 @@ async function startAt(at: number, { startSec = 0, auto = false, autoplay = true
   cancelCrossfade();
   const token = ++loadToken;
 
-  if (!extensionReady()) {
+  if (!playbackReady()) {
     usePlayer.setState({
       index: at,
       nowPlaying: { ...hintOf(entry.track), title: entry.track.title || 'Can’t play this here yet' },

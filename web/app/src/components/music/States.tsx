@@ -8,7 +8,10 @@ export const stateStyles = {
   button: 'mt-3 inline-flex h-8 items-center rounded-pill bg-key-bg px-4 type-body-emphasized text-white',
 };
 
-/** In place of a YouTube page when the extension isn't installed (prompt §1): an invitation, not an error. */
+/**
+ * In place of a YouTube page when requests can't be made at all: the extension
+ * isn't installed and no Worker is configured. An invitation, not an error.
+ */
 export function NeedsExtension({ what = 'YouTube Music' }: { what?: string }) {
   return (
     <div className={stateStyles.state}>
@@ -18,6 +21,24 @@ export function NeedsExtension({ what = 'YouTube Music' }: { what?: string }) {
       </p>
       <PrefetchLink to="/extension" className={stateStyles.button}>
         Get the Extension
+      </PrefetchLink>
+    </div>
+  );
+}
+
+/**
+ * In place of a page that needs an account, on the pure-web build: there is no
+ * extension to sign in through, so the session comes from the bookmarklet.
+ */
+export function NeedsSignIn({ what = 'your library' }: { what?: string }) {
+  return (
+    <div className={stateStyles.state}>
+      <p className={stateStyles.title}>Sign in to see {what}</p>
+      <p className={stateStyles.detail}>
+        Sign in at music.youtube.com, then hand the session to BitChord with the bookmarklet. It stays on this device.
+      </p>
+      <PrefetchLink to="/sign-in" className={stateStyles.button}>
+        Sign In
       </PrefetchLink>
     </div>
   );

@@ -8,7 +8,7 @@ import { Outlet } from 'react-router';
 import { PrefetchLink } from '@/components/PrefetchLink';
 import { config } from '@/config';
 import { useExtension } from '@/extension/useExtension';
-import { isMobileBrowser } from '@/lib/platform';
+import { isMobileBrowser, isPureWeb } from '@/lib/platform';
 import { useUi } from '@/state/ui';
 import { useKeyboardShortcuts } from './useKeyboardShortcuts';
 import { Banner, bannerButtonClass } from './Banner';
@@ -44,7 +44,9 @@ export function AppShell() {
   const fullScreen = useUi((s) => s.fullScreen);
 
   let banner = null;
-  if (mobile) {
+  // With the Worker configured a phone browser plays on its own (the sandboxed
+  // iframe + direct audio), so the "get the app" nudge is no longer true.
+  if (mobile && !isPureWeb()) {
     banner = (
       <Banner
         title="BitChord is better in the app."
@@ -56,7 +58,7 @@ export function AppShell() {
         }
       />
     );
-  } else if (extension.state === 'missing' && !bannerDismissed) {
+  } else if (extension.state === 'missing' && !isPureWeb() && !bannerDismissed) {
     banner = (
       <Banner
         title="Play YouTube Music with the BitChord extension."

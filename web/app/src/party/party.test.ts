@@ -123,4 +123,13 @@ describe('invites', () => {
     expect(inviteUrl('ab12cd', null)).toBe('https://bitchord.kushagrasingh.in/invite/AB12CD');
     expect(inviteUrl('AB12CD', 'https://jam.example.com/')).toBe('https://jam.example.com/invite/AB12CD');
   });
+
+  it('reads hash-routed invites (GitHub Pages) with or without a base path', () => {
+    expect(parseInvite('https://fzrilsh.github.io/BitChord/#/invite/AB12CD')).toEqual({ code: 'AB12CD', serverUrl: null });
+    expect(parseInvite('https://fzrilsh.github.io/BitChord/#/invite/AB12CD?server=jam.example.com')).toEqual({
+      code: 'AB12CD',
+      serverUrl: 'https://jam.example.com',
+    });
+    expect(parseInvite('https://fzrilsh.github.io/#/invite/AB12CD')).toEqual({ code: 'AB12CD', serverUrl: null });
+  });
 });

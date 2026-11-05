@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>BitChord sandbox</title>
+  </head>
+  <body>
+    <!--
+      Loaded in an iframe with sandbox="allow-scripts" and no allow-same-origin,
+      so this document runs with an opaque origin ("null"). That is the whole
+      point: youtubei answers unknown page origins with 403, but answers an
+      opaque origin with 200 + `Access-Control-Allow-Origin: null`.
+
+      Requests leave from the user's device, so the googlevideo URLs the player
+      response mints are signed for the device's IP and play directly.
+
+      This document does exactly one thing: fetch, and post the result back.
+      It holds no app state and never sees a session cookie.
+    -->
+    <script>
+      const SAFELISTED = new Set(['accept', 'accept-language', 'content-language']);
+
+      /** youtubei answers a preflight with 400, so only a "simple" request can work. */
+      function simpleHeaders(input) {
+        const headers = {};
+        for (const [key, value] of Object.entries(input || {})) {
+          if (SAFELISTED.has(key.toLowerCase())) headers[key] = value;
+        }
+        return headers;
+      }
+
+      window.addEventListener('message', async (event) => {
+        const message = event.data;
+        if (!message || message.type !== 'rpc:fetch' || typeof message.id !== 'string') return;
+        // An opaque origin cannot be checked, so the sender is checked instead.
+        if (event.source !== window.parent) return;
+
+        const { id, url, method = 'GET', body = null } = message;
+        try {
+          const headers = simpleHeaders(message.headers);
+          if (body != null) headers['Content-Type'] = 'text/plain;charset=UTF-8';
+          const response = await fetch(url, {
+            method,
+            headers,
+            body: body ?? null,
+            // The page's YouTube cookies must never ride along.
+            credentials: 'omit',
+            signal: message.timeoutMs ? AbortSignal.timeout(message.timeoutMs) : undefined,
+          });
+          const responseHeaders = {};
+          response.headers.forEach((value, key) => {
+            responseHeaders[key] = value;
+          });
+          window.parent.postMessage(
+            {
+              type: 'rpc:fetch:response',
+              id,
+              status: response.status,
+              statusText: response.statusText,
+              headers: responseHeaders,
+              body: await response.text(),
+            },
+            '*',
+          );
+        } catch (error) {
+          window.parent.postMessage(
+            { type: 'rpc:fetch:error', id, error: error instanceof Error ? error.message : String(error) },
+            '*',
+          );
+        }
+      });
+
+      // The host waits for this before sending anything.
+      window.parent.postMessage({ type: 'rpc:ready' }, '*');
+    </script>
+  </body>
+</html>

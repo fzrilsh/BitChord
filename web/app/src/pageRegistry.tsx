@@ -39,6 +39,8 @@ export const pages: PageRoute[] = [
   { path: '/settings/listen-together', load: () => import('@/pages/ListenTogetherPage'), skeleton: <PlainSkeleton /> },
   { path: '/invite/:code', load: () => import('@/pages/ListenTogetherPage'), skeleton: <PlainSkeleton /> },
   { path: '/extension', load: () => import('@/pages/ExtensionPage'), skeleton: <PlainSkeleton /> },
+  { path: '/sign-in', load: () => import('@/pages/SignInPage'), skeleton: <PlainSkeleton /> },
+  { path: '/capture', load: () => import('@/pages/CapturePage'), skeleton: <PlainSkeleton /> },
   { path: '/debug', load: () => import('@/pages/DebugPage'), skeleton: <PlainSkeleton /> },
 ];
 

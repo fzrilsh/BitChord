@@ -31,12 +31,17 @@ export function parseInvite(value: string): { code: string; serverUrl: string | 
   } catch {
     return null;
   }
-  const server = sanitizeServerUrl(url.searchParams.get('server'));
+  // Hash routing puts the route (and sometimes the query) in the fragment.
+  const hash = url.hash.replace(/^#/, '');
+  const hashQuery = hash.includes('?') ? hash.slice(hash.indexOf('?') + 1) : '';
+  const server = sanitizeServerUrl(url.searchParams.get('server')) ?? sanitizeServerUrl(new URLSearchParams(hashQuery).get('server'));
   if (url.protocol === 'bitchord:' && url.host.toLowerCase() === 'party') {
     const code = cleanCode(url.pathname.replace(/^\/+|\/+$/g, '') || url.searchParams.get('code') || '');
     return code ? { code, serverUrl: server } : null;
   }
-  const match = url.pathname.match(/^\/invite\/([A-Za-z0-9]{6})$/);
+  const route = hash ? hash.split('?')[0]! : url.pathname;
+  // `/[<base>/]invite/<CODE>`, with or without the GitHub Pages base path.
+  const match = route.match(/(?:^|\/)invite\/([A-Za-z0-9]{6})\/?$/);
   if ((url.protocol === 'https:' || url.protocol === 'http:') && match) return { code: match[1]!.toUpperCase(), serverUrl: server };
   return null;
 }

@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react';
 import type { DetectedExtension } from '@bitchord/shared/bridge';
 import { extensionQueryKey, useExtension } from '@/extension/useExtension';
 import { useYtAuth, ytAuthSnapshot } from '@/extension/useYtAuth';
+import { isPureWeb } from '@/lib/platform';
 import { queryClient } from '@/lib/queryClient';
 import {
   addToPlaylist,
@@ -85,12 +86,20 @@ export const playlistQuery = (id: string) =>
     staleTime: STALE,
   });
 
-/** True once the extension has answered; queries wait on it. */
+/**
+ * Whether YouTube requests can be made at all: through the extension, or —
+ * with no extension, as on iOS Safari — through the pure-web sandbox, which
+ * needs the Worker configured.
+ */
 export function useYouTubeReady(): { ready: boolean; missing: boolean } {
   const extension = useExtension();
+  const throughExtension = extension.state === 'present' && extension.extension.info.capabilities.includes('yt');
+  const throughSandbox = isPureWeb();
   return {
-    ready: extension.state === 'present' && extension.extension.info.capabilities.includes('yt'),
-    missing: extension.state === 'missing',
+    ready: throughExtension || throughSandbox,
+    // "Missing" drives the install/sign-in prompt: only once the extension has
+    // actually been looked for and there is no sandbox to fall back on.
+    missing: extension.state === 'missing' && !throughSandbox,
   };
 }
 
@@ -147,8 +156,14 @@ export function useSuggestions(input: string) {
 /** Warms the first query of a page, for links' hover/focus prefetch (prompt §3). */
 export function prefetchPageData(pathname: string): void {
   const detected = queryClient.getQueryData<DetectedExtension | null>(extensionQueryKey);
-  if (!detected?.info.capabilities.includes('yt')) return;
-  const [, kind, id] = pathname.split('/');
+  if (!detected?.info.capabilities.includes('yt') && !isPureWeb()) return;
+  // Callers pass a router path, but a link can carry the hash route or the
+  // app's base path (`/BitChord/album/…` on GitHub Pages); strip both.
+  const route = pathname.replace(/^#/, '').replace(/\?.*$/, '');
+  const segments = route.split('/').filter(Boolean);
+  if (segments[0] === import.meta.env.BASE_URL.replace(/\/+$/, '').replace(/^\//, '')) segments.shift();
+  const [kind, id] = segments;
+  if (!kind) return;
   if (!id) {
     if (kind === 'home') void queryClient.prefetchInfiniteQuery(homeQuery());
     if (kind === 'new') void queryClient.prefetchQuery(exploreQuery());

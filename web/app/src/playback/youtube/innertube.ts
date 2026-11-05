@@ -1,22 +1,37 @@
 import type { Innertube, Types } from 'youtubei.js/web';
+import { config } from '@/config';
 import { getBridge } from '@/extension/bridge';
 import { ensureYtAuth, identityOf, noteMusicIdentity } from '@/extension/useYtAuth';
 import { trackLog } from '../trackLog';
+import { sandboxFetch } from './sandbox/bridge';
 
 /**
  * The page's YouTube.js instance, created on first use (YouTube.js is large,
  * prompt §3). All of its requests leave from the browser itself; the
  * extension's declarativeNetRequest rules supply the YouTube headers
  * (web/extension/lib/rules.ts).
+ *
+ * Without the extension (iOS Safari, any browser that can't install one) the
+ * requests go through a sandboxed iframe instead — see `pureWebFetch`.
  */
 let instance: Promise<Innertube> | null = null;
 
 export function getInnertube(): Promise<Innertube> {
-  instance ??= create().catch((error: unknown) => {
+  instance ??= create(selectFetch()).catch((error: unknown) => {
     instance = null;
     throw error;
   });
   return instance;
+}
+
+/** Which fetch the anonymous instance uses: the extension's, or the sandbox's. */
+function selectFetch(): typeof globalThis.fetch {
+  return getBridge() ? simpleRequestFetch : pureWebFetch;
+}
+
+/** Which fetch the signed instance uses. */
+function selectSignedFetch(): typeof globalThis.fetch {
+  return getBridge() ? signedFetch : workerSignedFetch;
 }
 
 /**
@@ -29,7 +44,7 @@ export function getInnertube(): Promise<Innertube> {
 let signedInstance: Promise<Innertube> | null = null;
 
 export function getSignedInnertube(): Promise<Innertube> {
-  signedInstance ??= create(signedFetch).then(
+  signedInstance ??= create(selectSignedFetch()).then(
     (yt) => {
       // Lifts YouTube.js's "must be signed in" checks (library pages). With
       // no cookie and no OAuth token it adds no credentials of its own.
@@ -132,6 +147,69 @@ async function signedFetch(input: RequestInfo | URL, init?: RequestInit): Promis
   });
 }
 
+/**
+ * Assets YouTube.js needs but YouTube serves without CORS headers for any
+ * origin: the session bootstrap (`/sw.js_data`), the player script the
+ * signature decipher runs from, and the iframe API.
+ *
+ * Measured 2026-11-05: each answers 200 but carries no
+ * `Access-Control-Allow-Origin`, so neither the page nor a sandboxed iframe can
+ * read them. The Worker fetches them with YouTube's own Origin and hands them
+ * back with `*`.
+ */
+function needsAssetProxy(url: URL): boolean {
+  if (url.hostname !== 'www.youtube.com') return false;
+  return url.pathname === '/sw.js_data' || url.pathname === '/iframe_api' || url.pathname.startsWith('/s/player/');
+}
+
+function workerAssetUrl(target: string): string {
+  return `${config.workerUrl.replace(/\/+$/, '')}/asset?u=${encodeURIComponent(target)}`;
+}
+
+/**
+ * The anonymous fetch without the extension: InnerTube calls run in the
+ * sandboxed iframe (opaque origin, which youtubei answers), and the ACAO-less
+ * assets go through the Worker. Everything else is a plain fetch.
+ *
+ * With no Worker configured the asset fetches fail as they would have before,
+ * and the app's "needs setup" states take over.
+ */
+async function pureWebFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const request = input instanceof Request ? input : null;
+  const url = new URL(request ? request.url : input.toString());
+
+  if (needsAssetProxy(url)) {
+    if (!config.workerUrl) throw new Error('YouTube assets need the BitChord Worker (set VITE_WORKER_URL)');
+    return fetch(workerAssetUrl(url.toString()), { signal: init?.signal ?? request?.signal ?? null });
+  }
+
+  if (isInnertubeCall(url)) return sandboxFetch(input, init);
+
+  return fetch(input, init);
+}
+
+/**
+ * Signed InnerTube calls without the extension. `Cookie` is a forbidden
+ * request header, so the browser cannot present the captured session; the
+ * Worker sets it, together with the SAPISIDHASH the page computed. See
+ * `auth/bookmarklet` for where the session comes from.
+ */
+async function workerSignedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const request = input instanceof Request ? input : null;
+  const url = new URL(request ? request.url : input.toString());
+  if (!isInnertubeCall(url)) return pureWebFetch(input, init);
+
+  if (!config.workerUrl) throw new Error('Signed-in requests need the BitChord Worker (set VITE_WORKER_URL)');
+
+  const { signedRequest } = await import('@/auth/bookmarklet/relay');
+  const method = (init?.method ?? request?.method ?? 'POST').toUpperCase();
+  let body = init?.body ?? undefined;
+  if (body === undefined && request && method !== 'GET') body = await request.text();
+  if (body != null && typeof body !== 'string') body = await new Response(body).text();
+
+  return signedRequest(url, { method, body: typeof body === 'string' ? body : null }, init?.signal ?? request?.signal ?? null);
+}
+
 async function isFirstRun(): Promise<boolean> {
   try {
     const databases = await indexedDB.databases();
@@ -141,7 +219,7 @@ async function isFirstRun(): Promise<boolean> {
   }
 }
 
-async function create(fetch: typeof globalThis.fetch = simpleRequestFetch): Promise<Innertube> {
+async function create(fetch: typeof globalThis.fetch = selectFetch()): Promise<Innertube> {
   const started = performance.now();
   const { Innertube, Platform, UniversalCache } = await import('youtubei.js/web');
 

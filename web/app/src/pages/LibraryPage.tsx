@@ -2,11 +2,12 @@ import { useEffect, useRef } from 'react';
 import { Navigate, useParams } from 'react-router';
 import { PageHeader } from '@/components/PageHeader';
 import { CircleLockup, SquareLockup, VideoLockup } from '@/components/music/Lockups';
-import { EmptyState, LoadError, LoadMoreError, NeedsExtension } from '@/components/music/States';
+import { EmptyState, LoadError, LoadMoreError, NeedsExtension, NeedsSignIn } from '@/components/music/States';
 import { TrackList } from '@/components/music/TrackList';
 import { isLibrarySection, LIBRARY_SECTIONS } from '@/data/music/library';
 import { useLibrary, useSignedIn, useYouTubeReady } from '@/data/music/queries';
 import { useYtAuth } from '@/extension/useYtAuth';
+import { isPureWeb } from '@/lib/platform';
 import { PlainSkeleton } from '@/skeletons/PageSkeletons';
 import { seeAllGrid, seeAllTracks } from './pageStyles';
 
@@ -42,6 +43,14 @@ export default function LibraryPage() {
   const title = LIBRARY_SECTIONS[section].title;
   if (missing) return <NeedsExtension what="your library" />;
   if (auth.state === 'ready' && !signedIn) {
+    if (isPureWeb()) {
+      return (
+        <>
+          <PageHeader title={title} />
+          <NeedsSignIn what="your library" />
+        </>
+      );
+    }
     return (
       <>
         <PageHeader title={title} />
