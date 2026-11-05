@@ -167,6 +167,18 @@ export function getAudio(): HTMLAudioElement | null {
 }
 
 /**
+ * Puts a prepared element in front, for tests.
+ *
+ * The real path builds two decks on the first play, which pulls in Shaka and
+ * YouTube.js; a transport test only needs an element whose `paused` behaves
+ * like WebKit's.
+ */
+export function __setAudioForTest(element: HTMLAudioElement): void {
+  audioElements = [element];
+  active = 0;
+}
+
+/**
  * Where the song in front is, in seconds, and whether it's moving. Its
  * element, except while a loop mix plays it from a deck: then the mix's own
  * beat clock, which loops and follows the tempo ramp (the element is paused
@@ -604,26 +616,36 @@ export const usePlayer = create<PlayerState>()((set, get) => ({
     const audio = getAudio();
     const { nowPlaying, status, index } = get();
     if (!nowPlaying) return;
+    // Whether this press means play or pause, decided BEFORE anything touches the
+    // element. `play()` sets `paused` to false synchronously in WebKit, so
+    // reading `audio.paused` again after an unlock call makes a resume look like
+    // a pause — the press then ran play() and pause() in the same tick, and
+    // resuming did nothing. Measured 2026-11-05 in WebKit.
     const resuming = !audio || audio.paused || status === 'error';
     // A routed graph left suspended (no gesture when it was built) would play silence.
     if (resuming) void graph?.ctx.resume();
+    // A listener in a party the host has locked: the press moves this device alone.
+    if (partyHooks?.onLockedTransport(resuming)) return;
+
+    if (!resuming) {
+      cancelCrossfade();
+      audio!.pause();
+      intent();
+      return;
+    }
+
     // iOS only lets a media element start from inside a user gesture. Loading a
     // track awaits the player request, the decipher and BotGuard first, so by
     // the time `play()` is called the gesture has expired and the element stays
-    // silent. Playing an empty element now, inside the gesture, unlocks it for
+    // silent. Playing the loaded element now, inside the gesture, unlocks it for
     // the load that follows.
-    if (audio && resuming) audio.play().catch(() => {});
-    // A listener in a party the host has locked: the press moves this device alone.
-    if (partyHooks?.onLockedTransport(resuming)) return;
     if (!audio || status === 'error') {
+      if (audio) void audio.play().catch(() => {});
       // A stopped or failed track starts again from where it was.
       void startAt(index, { startSec: audio?.currentTime ?? 0 });
-    } else if (audio.paused) {
+    } else if (!partyHooks?.shouldDeferPlay()) {
       // In a party, a resume waits for the instant the server schedules for everyone.
-      if (!partyHooks?.shouldDeferPlay()) void audio.play().catch((e: unknown) => trackLog.w(`play() refused: ${String(e)}`));
-    } else {
-      cancelCrossfade();
-      audio.pause();
+      void audio.play().catch((e: unknown) => trackLog.w(`play() refused: ${String(e)}`));
     }
     intent();
   },
