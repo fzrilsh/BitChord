@@ -148,11 +148,13 @@ interface Deck {
 
 let decks: Deck[] | null = null;
 let decksPromise: Promise<Deck[]> | null = null;
+/** The two media elements, made on the first tap (see createElements). */
+let audioElements: HTMLAudioElement[] | null = null;
 let active = 0;
 
 /** The audio element in front, if playback has started at least once. */
 export function getAudio(): HTMLAudioElement | null {
-  return decks?.[active]?.audio ?? null;
+  return decks?.[active]?.audio ?? audioElements?.[active] ?? null;
 }
 
 /**
@@ -176,29 +178,61 @@ export function getMixBeat(): { phase: number | null } | null {
   return graph?.dj.mixBeat() ?? null;
 }
 
+/**
+ * Starts the deck's element inside the tap that asked for a track.
+ *
+ * iOS refuses to start a media element outside a user gesture, and loading a
+ * track awaits a player request, a decipher and BotGuard before it can call
+ * `play()`. Calling it here, synchronously, marks the element as allowed to
+ * play; the real stream then starts when its URL is set. On every other browser
+ * this is a no-op: the element has no source yet.
+ *
+ * Only once the decks exist — the first tap creates them, and that path goes
+ * through `startAt`, whose own unlock happens before its first await.
+ */
+function unlockAudio(): void {
+  // The first tap happens before the decks exist (they need a dynamic import).
+  // Make just the elements now, synchronously, so there is something to unlock;
+  // the engines attach to them when the import resolves.
+  createElements();
+  const audio = getAudio();
+  if (!audio || !audio.paused) return;
+  audio.play().catch(() => {
+    // No source yet, or the browser refused: the load path reports the reason.
+  });
+}
+
+/** The two audio elements, made as soon as anything needs them. */
+function createElements(): HTMLAudioElement[] {
+  if (audioElements) return audioElements;
+  audioElements = [0, 1].map(() => {
+    const audio = new Audio();
+    audio.preload = 'auto';
+    audio.setAttribute('playsinline', '');
+    // Media from another origin is silent inside an AudioContext unless it is
+    // fetched with CORS (prompt §6, the Web Audio caveat). Only with the
+    // extension: its rules add the ACAO header googlevideo omits, and without
+    // it a crossOrigin element must satisfy CORS, which googlevideo refuses.
+    if (getBridge()) audio.crossOrigin = 'anonymous';
+    // iOS Safari will not load media for an element that is not in the
+    // document: `duration` stays 0 and nothing plays, however often `play()`
+    // is called. The element is invisible; it is here only to be allowed to play.
+    audio.style.display = 'none';
+    document.body.appendChild(audio);
+    return audio;
+  });
+  return audioElements;
+}
+
 function getDecks(): Promise<Deck[]> {
   decksPromise ??= (async () => {
     // Shaka, YouTube.js and googlevideo are the heavy part of the app; they
     // load on the first play, not with the page (prompt §3).
     const { YouTubeEngine } = await import('@/playback/youtube/engine');
-    decks = [0, 1].map((n) => {
-      const audio = new Audio();
-      audio.preload = 'auto';
-      audio.setAttribute('playsinline', '');
-      // Media from another origin is silent inside an AudioContext unless it
-      // is fetched with CORS (prompt §6, the Web Audio caveat).
-      //
-      // Only with the extension: its rules add the ACAO header googlevideo
-      // omits. Without it, a crossOrigin element must satisfy CORS and the
-      // stream is refused, so the direct path leaves the attribute off.
-      if (getBridge()) audio.crossOrigin = 'anonymous';
-      // iOS Safari will not load media for an element that is not in the
-      // document: `duration` stays 0 and nothing plays, however often `play()`
-      // is called. Desktop browsers do not care, which is why this only showed
-      // up on a phone. The element is invisible; it is in the DOM only to be
-      // allowed to play.
-      audio.style.display = 'none';
-      document.body.appendChild(audio);
+    // The elements may already exist: the tap that started this made them so
+    // there was something to unlock on iOS. Attach an engine to each.
+    const elements = createElements();
+    decks = elements.map((audio, n) => {
       const engine = new YouTubeEngine(audio);
       const deck: Deck = { engine, audio, gain: 1 };
       engine.onFatal = (videoId, message) => {
@@ -450,6 +484,7 @@ export const usePlayer = create<PlayerState>()((set, get) => ({
 
   playTracks(tracks, startIndex, source) {
     if (!tracks.length) return;
+    unlockAudio();
     const { queue, index, shuffle } = get();
     const built = buildContextQueue(queue, index, tracks, startIndex, source);
     if (shuffle) {
@@ -468,6 +503,7 @@ export const usePlayer = create<PlayerState>()((set, get) => ({
     const { queue, index } = get();
     canonical = null;
     set({ queue: buildOneOffQueue(queue, index, track, source) });
+    unlockAudio();
     void startAt(0);
     intent();
   },
@@ -557,6 +593,12 @@ export const usePlayer = create<PlayerState>()((set, get) => ({
     const resuming = !audio || audio.paused || status === 'error';
     // A routed graph left suspended (no gesture when it was built) would play silence.
     if (resuming) void graph?.ctx.resume();
+    // iOS only lets a media element start from inside a user gesture. Loading a
+    // track awaits the player request, the decipher and BotGuard first, so by
+    // the time `play()` is called the gesture has expired and the element stays
+    // silent. Playing an empty element now, inside the gesture, unlocks it for
+    // the load that follows.
+    if (audio && resuming) audio.play().catch(() => {});
     // A listener in a party the host has locked: the press moves this device alone.
     if (partyHooks?.onLockedTransport(resuming)) return;
     if (!audio || status === 'error') {
