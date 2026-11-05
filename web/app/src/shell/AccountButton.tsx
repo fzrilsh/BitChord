@@ -1,7 +1,9 @@
 import { ArrowUpRight, ChevronsUpDown } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import { Menu, MenuHeader, MenuItem, MenuSeparator } from '@/components/Menu';
+import { PrefetchLink } from '@/components/PrefetchLink';
 import { useRefreshYtAuth, useSelectChannel, useSetConnected, useYtAuth } from '@/extension/useYtAuth';
+import { useExtension } from '@/extension/useExtension';
 
 const SIGN_IN_URL = 'https://accounts.google.com/ServiceLogin?service=youtube&continue=https://music.youtube.com/';
 
@@ -30,16 +32,29 @@ function Avatar({ src, name, size }: { src: string | null; name: string; size: n
  */
 export function AccountButton() {
   const status = useYtAuth();
+  const extension = useExtension();
   const select = useSelectChannel();
   const connect = useSetConnected();
   const refresh = useRefreshYtAuth();
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const close = useCallback(() => setAnchor(null), []);
 
+  // Only the extension can notice a Google sign-in on its own. Without it
+  // (iOS Safari, or any browser that can't install one) the session has to be
+  // handed over with the bookmarklet, so "Sign In" leads there instead.
+  const bookmarkletFlow = extension.state === 'missing';
+
   if (status.state !== 'ready') return null;
   const { auth } = status;
 
   if (!auth.browserSignedIn) {
+    if (bookmarkletFlow) {
+      return (
+        <PrefetchLink className={pill} to="/sign-in">
+          Sign In
+        </PrefetchLink>
+      );
+    }
     return (
       <a className={pill} href={SIGN_IN_URL} target="_blank" rel="noreferrer">
         Sign In
@@ -107,16 +122,30 @@ export function AccountButton() {
           <MenuItem
             onSelect={() => {
               close();
+              if (bookmarkletFlow) {
+                // A second capture replaces the stored session.
+                window.location.hash = '#/sign-in';
+                return;
+              }
               window.open(SIGN_IN_URL.replace('ServiceLogin', 'AddSession'), '_blank', 'noreferrer');
             }}
             trailing={<ArrowUpRight size={13} />}
           >
-            Add Account
+            {bookmarkletFlow ? 'Replace session' : 'Add Account'}
           </MenuItem>
           <MenuItem
             destructive
             onSelect={() => {
               close();
+              if (bookmarkletFlow) {
+                // Nothing in the extension holds this session; forget it here.
+                void import('@/auth/bookmarklet/storage').then(async (storage) => {
+                  await storage.clearSession();
+                  const { refreshYtAuth } = await import('@/extension/useYtAuth');
+                  await refreshYtAuth();
+                });
+                return;
+              }
               connect.mutate(false);
             }}
           >
